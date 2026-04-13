@@ -18,8 +18,13 @@
 #include "tcp.h"
 #include "dctcp.h"
 #include "config.h"
+#include "topology.h"
 #include "mixnet.h"
 #include "fat_tree_topology.h"
+#include "fc_topology.h"
+#include "flat_topology.h"
+#include "os_fattree.h"
+#include "agg_os_fattree.h"
 #include "mixnet_topomanager.h"
 
 #include <map>
@@ -57,13 +62,25 @@ map<std::pair<int, std::pair<int, int>>, uint64_t> sent_chunksize;
 // Port number tracking (same as ns3/common.h)
 std::unordered_map<uint32_t, unordered_map<uint32_t, uint16_t>> portNumber;
 
+// ======== Topology type enum ========
+enum TopoType {
+  TOPO_MIXNET,       // OCS-ECS hybrid (Mixnet wrapping FatTree)
+  TOPO_FATTREE,      // Pure fat-tree (full bandwidth)
+  TOPO_OS_FATTREE,   // Oversubscribed fat-tree
+  TOPO_AGG_OS_FATTREE, // Aggregated oversubscribed fat-tree
+  TOPO_FC,           // Full circuit (all-to-all direct)
+  TOPO_FLAT,         // Flat topology
+};
+
 // ======== htsim global objects ========
 EventList* g_eventlist = nullptr;
-Mixnet* g_mixnet_topo = nullptr;
+Topology* g_topology = nullptr;       // Generic topology pointer (all topos)
+Mixnet* g_mixnet_topo = nullptr;      // Only set for TOPO_MIXNET
 FatTreeTopology* g_fattree_topo = nullptr;
 MixnetTopoManager* g_topomanager = nullptr;
 All2AllTrafficRecorder* g_demand_recorder = nullptr;
 TcpRtxTimerScanner* g_tcp_scanner = nullptr;
+TopoType g_topo_type = TOPO_MIXNET;
 
 // OCS/ECS config
 int g_gpus_per_server = 8;
@@ -452,39 +469,35 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
     return;
   }
 
-  // ---- OCS/ECS selection ----
+  // ---- Routing decision ----
   bool use_ocs = false;
 
-  // All_to_All (com_type==4) uses OCS if circuit available
-  static int ocs_dbg_count = 0;
-  if (com_type == 4 && g_mixnet_topo != nullptr) {
-    if (src_machine < (int)g_mixnet_topo->conn.size() &&
-        dst_machine < (int)g_mixnet_topo->conn[src_machine].size()) {
-      int cv = g_mixnet_topo->conn[src_machine][dst_machine];
-      if (ocs_dbg_count < 10) {
-        cerr << "[OCS_DBG] src=" << src << " m" << src_machine << " dst=" << dst << " m" << dst_machine
-             << " conn=" << cv << " conn_size=" << g_mixnet_topo->conn.size() << endl;
-        ocs_dbg_count++;
-      }
-      if (cv > 0) {
-        use_ocs = true;
+  if (g_topo_type == TOPO_MIXNET) {
+    // Mixnet mode: OCS/ECS selection logic
+    static int ocs_dbg_count = 0;
+    if (com_type == 4 && g_mixnet_topo != nullptr) {
+      if (src_machine < (int)g_mixnet_topo->conn.size() &&
+          dst_machine < (int)g_mixnet_topo->conn[src_machine].size()) {
+        int cv = g_mixnet_topo->conn[src_machine][dst_machine];
+        if (ocs_dbg_count < 10) {
+          cerr << "[OCS_DBG] src=" << src << " m" << src_machine << " dst=" << dst << " m" << dst_machine
+               << " conn=" << cv << endl;
+          ocs_dbg_count++;
+        }
+        if (cv > 0) use_ocs = true;
       }
     }
-  }
-  // Force ECS-only mode (for comparison testing)
-  if (g_force_ecs_only) {
-    use_ocs = false;
+    if (g_force_ecs_only) use_ocs = false;
   }
 
-  // Log OCS/ECS decision
+  // Log flow decision
   if (use_ocs) {
     g_flow_count_ocs++;
     g_flow_bytes_ocs += maxPacketCount;
     if (g_flow_count_ocs <= 10) {
       cout << "[SendFlow] OCS: src=" << src << "(m" << src_machine << ") dst=" << dst
            << "(m" << dst_machine << ") size=" << maxPacketCount
-           << " com_type=" << com_type
-           << " conn=" << g_mixnet_topo->conn[src_machine][dst_machine] << endl;
+           << " com_type=" << com_type << endl;
     }
   } else {
     g_flow_count_ecs++;
@@ -496,20 +509,19 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
     }
   }
 
-  // Record traffic demand for reconfiguration (skip in ECS-only mode)
-  if (com_type == 4 && g_mixnet_topo != nullptr && !g_force_ecs_only) {
-    int layer_tag = request->flowTag.tag_id;  // use tag_id as layer identifier
+  // Record traffic demand for reconfiguration (mixnet only)
+  if (g_topo_type == TOPO_MIXNET && com_type == 4 && g_mixnet_topo != nullptr && !g_force_ecs_only) {
+    int layer_tag = request->flowTag.tag_id;
     g_demand_tracker.record_demand(src_machine, dst_machine, maxPacketCount,
                                     layer_tag, g_mixnet_topo->region_size);
   }
 
-  // Check if OCS region is under reconfiguration
+  // Check if OCS region is under reconfiguration (mixnet only)
   if (use_ocs && g_topomanager != nullptr) {
     int region_id = src_machine / g_mixnet_topo->region_size;
     if (region_id < (int)g_topomanager->regional_topo_managers.size()) {
       RegionalTopoManager* rtm = g_topomanager->regional_topo_managers[region_id];
       if (rtm->status == RegionalTopoManager::TopoStatus::TOPO_RECONF) {
-        // Defer this flow until reconfiguration ends
         simtime_picosec resume_time = rtm->reconfig_end_time;
         if (g_eventlist->now() < resume_time) {
           g_flow_count_deferred++;
@@ -554,62 +566,64 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
   vector<const Route*>* dstpaths = nullptr;
 
   static int get_path_count = 0;
-  if (get_path_count < 5) {
-    cerr << "[SendFlow] Getting paths: src=" << src << " dst=" << dst
-         << " use_ocs=" << use_ocs
-         << " src_m=" << src_machine << " dst_m=" << dst_machine << endl;
-  }
 
-  if (use_ocs) {
-    // Re-check conn right before calling get_paths to avoid race with reconfiguration
-    int conn_val = g_mixnet_topo->conn[src_machine][dst_machine];
-    if (conn_val > 0) {
-      srcpaths = g_mixnet_topo->get_paths(src, dst);
-      if (get_path_count < 5) cerr << "[SendFlow] OCS srcpaths obtained, size=" << (srcpaths ? (int)srcpaths->size() : -1) << endl;
-      // Also check reverse direction conn for dstpaths
-      int conn_rev = g_mixnet_topo->conn[dst_machine][src_machine];
-      if (conn_rev > 0) {
-        dstpaths = g_mixnet_topo->get_paths(dst, src);
-        if (get_path_count < 5) cerr << "[SendFlow] OCS dstpaths obtained, size=" << (dstpaths ? (int)dstpaths->size() : -1) << endl;
+  if (g_topo_type == TOPO_MIXNET) {
+    // Mixnet: OCS uses get_paths(), ECS uses get_eps_paths()
+    if (use_ocs) {
+      int conn_val = g_mixnet_topo->conn[src_machine][dst_machine];
+      if (conn_val > 0) {
+        srcpaths = g_mixnet_topo->get_paths(src, dst);
+        int conn_rev = g_mixnet_topo->conn[dst_machine][src_machine];
+        if (conn_rev > 0) {
+          dstpaths = g_mixnet_topo->get_paths(dst, src);
+        } else {
+          use_ocs = false;
+          srcpaths = g_mixnet_topo->get_eps_paths(src, dst);
+          dstpaths = g_mixnet_topo->get_eps_paths(dst, src);
+          flowSrc->is_elec = true;
+        }
       } else {
-        // Reverse conn lost during reconfig, fall back to ECS
         use_ocs = false;
         srcpaths = g_mixnet_topo->get_eps_paths(src, dst);
         dstpaths = g_mixnet_topo->get_eps_paths(dst, src);
         flowSrc->is_elec = true;
       }
     } else {
-      // conn lost during reconfig, fall back to ECS
-      use_ocs = false;
       srcpaths = g_mixnet_topo->get_eps_paths(src, dst);
       dstpaths = g_mixnet_topo->get_eps_paths(dst, src);
-      flowSrc->is_elec = true;
-      if (get_path_count < 5) cerr << "[SendFlow] OCS->ECS fallback: conn became 0 after reconfig" << endl;
+    }
+    // Fallback if paths still empty
+    if (srcpaths == nullptr || srcpaths->empty() || dstpaths == nullptr || dstpaths->empty()) {
+      if (use_ocs) {
+        srcpaths = g_mixnet_topo->get_eps_paths(src, dst);
+        dstpaths = g_mixnet_topo->get_eps_paths(dst, src);
+        use_ocs = false;
+      }
     }
   } else {
-    srcpaths = g_mixnet_topo->get_eps_paths(src, dst);
-    if (get_path_count < 5) cerr << "[SendFlow] ECS srcpaths obtained, size=" << (srcpaths ? (int)srcpaths->size() : -1) << endl;
-    dstpaths = g_mixnet_topo->get_eps_paths(dst, src);
-    if (get_path_count < 5) cerr << "[SendFlow] ECS dstpaths obtained, size=" << (dstpaths ? (int)dstpaths->size() : -1) << endl;
+    // Generic topology: use get_paths() with machine-level addressing
+    srcpaths = g_topology->get_paths(src_machine, dst_machine);
+    dstpaths = g_topology->get_paths(dst_machine, src_machine);
+  }
+
+  if (get_path_count < 5) {
+    cerr << "[SendFlow] src=" << src << " dst=" << dst
+         << " src_m=" << src_machine << " dst_m=" << dst_machine
+         << " ocs=" << use_ocs
+         << " srcpaths=" << (srcpaths ? (int)srcpaths->size() : -1)
+         << " dstpaths=" << (dstpaths ? (int)dstpaths->size() : -1) << endl;
   }
   get_path_count++;
 
   if (srcpaths == nullptr || srcpaths->empty() || dstpaths == nullptr || dstpaths->empty()) {
     NcclLog->writeLog(NcclLogLevel::ERROR,
-        "[htsim] No path found for src %d dst %d use_ocs %d", src, dst, use_ocs);
-    // Fall back to ECS
-    if (use_ocs) {
-      srcpaths = g_mixnet_topo->get_eps_paths(src, dst);
-      dstpaths = g_mixnet_topo->get_eps_paths(dst, src);
-      use_ocs = false;
-    }
-    if (srcpaths == nullptr || srcpaths->empty() || dstpaths == nullptr || dstpaths->empty()) {
-      cout << "[htsim] FATAL: No path at all for src " << src << " dst " << dst << endl;
-      delete flowSrc;
-      delete flowSnk;
-      delete ctx;
-      return;
-    }
+        "[htsim] No path found for src %d dst %d (m%d->m%d)", src, dst, src_machine, dst_machine);
+    cout << "[htsim] FATAL: No path for src " << src << " dst " << dst
+         << " (m" << src_machine << "->m" << dst_machine << ")" << endl;
+    delete flowSrc;
+    delete flowSnk;
+    delete ctx;
+    return;
   }
 
   int choice = rand() % srcpaths->size();

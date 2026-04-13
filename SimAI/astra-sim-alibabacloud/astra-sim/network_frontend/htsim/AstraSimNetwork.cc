@@ -197,6 +197,7 @@ public:
 // ======== Command-line parameters ========
 struct user_param {
   string workload;
+  string topo;          // topology type
   int nodes;           // total GPU count
   int alpha;           // max OCS circuits per machine
   uint32_t speed;      // link speed in Mbps
@@ -209,9 +210,11 @@ struct user_param {
   int queuesize_pkts;  // queue size in packets
   int iterations;      // number of forward+backward passes
   bool ecs_only;       // force all traffic through ECS (no OCS)
+  int os_ratio;        // oversubscription ratio for os_fattree/agg_os_fattree (default: 2)
 
   user_param() {
     workload = "";
+    topo = "mixnet";
     nodes = 8;
     alpha = 4;
     speed = 100000;       // 100Gbps
@@ -224,16 +227,18 @@ struct user_param {
     queuesize_pkts = 8;
     iterations = 1;
     ecs_only = false;
+    os_ratio = 2;
   }
 };
 
 static void print_usage() {
   cout << "Usage: simai_htsim [options]" << endl;
   cout << "  -w, --workload FILE     Workload file path (required)" << endl;
+  cout << "  --topo TYPE             Topology: mixnet|fattree|os_fattree|agg_os_fattree|fc|flat (default: mixnet)" << endl;
   cout << "  --nodes N               Total GPU count (default: 8)" << endl;
-  cout << "  --alpha N               Max OCS circuits per machine (default: 4)" << endl;
+  cout << "  --alpha N               Max OCS circuits per machine (default: 4, mixnet only)" << endl;
   cout << "  --speed N               Link speed in Mbps (default: 100000)" << endl;
-  cout << "  --reconf_delay N        Reconf delay in us (default: 10)" << endl;
+  cout << "  --reconf_delay N        Reconf delay in us (default: 10, mixnet only)" << endl;
   cout << "  --dp_degree N           Data parallel degree (default: 1)" << endl;
   cout << "  --tp_degree N           Tensor parallel degree (default: 1)" << endl;
   cout << "  --pp_degree N           Pipeline parallel degree (default: 1)" << endl;
@@ -241,12 +246,14 @@ static void print_usage() {
   cout << "  --gpus_per_server N     GPUs per server (default: 8)" << endl;
   cout << "  --queuesize N           Queue size in packets (default: 8)" << endl;
   cout << "  --iterations N          Number of passes (default: 1)" << endl;
-  cout << "  --ecs_only              Force all traffic through ECS (no OCS)" << endl;
+  cout << "  --ecs_only              Force all traffic through ECS (no OCS, mixnet only)" << endl;
+  cout << "  --os_ratio N            Oversubscription ratio (default: 2, os_fattree/agg_os_fattree only)" << endl;
 }
 
 static int parse_params(int argc, char* argv[], struct user_param* params) {
   static struct option long_options[] = {
     {"workload",      required_argument, 0, 'w'},
+    {"topo",          required_argument, 0, 'T'},
     {"nodes",         required_argument, 0, 'N'},
     {"alpha",         required_argument, 0, 'a'},
     {"speed",         required_argument, 0, 's'},
@@ -259,6 +266,7 @@ static int parse_params(int argc, char* argv[], struct user_param* params) {
     {"queuesize",     required_argument, 0, 'q'},
     {"iterations",    required_argument, 0, 'i'},
     {"ecs_only",      no_argument,       0, 'E'},
+    {"os_ratio",      required_argument, 0, 'O'},
     {"help",          no_argument,       0, 'h'},
     {0, 0, 0, 0}
   };
@@ -267,6 +275,7 @@ static int parse_params(int argc, char* argv[], struct user_param* params) {
   while ((opt = getopt_long(argc, argv, "w:h", long_options, &option_index)) != -1) {
     switch (opt) {
       case 'w': params->workload = optarg; break;
+      case 'T': params->topo = optarg; break;
       case 'N': params->nodes = stoi(optarg); break;
       case 'a': params->alpha = stoi(optarg); break;
       case 's': params->speed = stoi(optarg); break;
@@ -279,6 +288,7 @@ static int parse_params(int argc, char* argv[], struct user_param* params) {
       case 'q': params->queuesize_pkts = stoi(optarg); break;
       case 'i': params->iterations = stoi(optarg); break;
       case 'E': params->ecs_only = true; break;
+      case 'O': params->os_ratio = stoi(optarg); break;
       case 'h': print_usage(); return 1;
       default:  print_usage(); return 1;
     }
@@ -311,23 +321,35 @@ int main(int argc, char *argv[]) {
   int gpu_num = params.nodes;
   int nodes_num = gpu_num;  // htsim uses GPU-level nodes only
 
+  // Parse topology type
+  string topo_name = params.topo;
+  if (topo_name == "mixnet")          g_topo_type = TOPO_MIXNET;
+  else if (topo_name == "fattree")    g_topo_type = TOPO_FATTREE;
+  else if (topo_name == "os_fattree") g_topo_type = TOPO_OS_FATTREE;
+  else if (topo_name == "agg_os_fattree") g_topo_type = TOPO_AGG_OS_FATTREE;
+  else if (topo_name == "fc")         g_topo_type = TOPO_FC;
+  else if (topo_name == "flat")       g_topo_type = TOPO_FLAT;
+  else {
+    cerr << "Error: unknown topology '" << topo_name << "'" << endl;
+    print_usage();
+    return 1;
+  }
+
   // ---- Create log directory ----
-  // Find project root (where the binary is, go up if needed)
   string exe_path = argv[0];
   string project_root = exe_path.substr(0, exe_path.find_last_of('/'));
   if (project_root.empty()) project_root = ".";
   string log_base = project_root + "/log";
   mkdir(log_base.c_str(), 0755);
 
-  // Build run dir name: EP_x_TP_x_DP_x_PP_x_{OCS|ECS}_GPUx_iterX
-  string net_mode = params.ecs_only ? "ECS" : "OCS";
-  string run_dir_name = "EP_" + to_string(params.ep_degree)
-      + "_TP_" + to_string(params.tp_degree)
-      + "_DP_" + to_string(params.dp_degree)
-      + "_PP_" + to_string(params.pp_degree)
-      + "_" + net_mode
-      + "_GPU" + to_string(gpu_num)
-      + "_iter" + to_string(params.iterations);
+  // Build run dir name: {topo}_{timestamp}
+  string net_mode;
+  if (g_topo_type == TOPO_MIXNET) {
+    net_mode = params.ecs_only ? "mixnet_ECS" : "mixnet_OCS";
+  } else {
+    net_mode = topo_name;
+  }
+  string run_dir_name = net_mode;
 
   // Add timestamp to avoid overwrite
   time_t now_t = time(nullptr);
@@ -345,15 +367,18 @@ int main(int argc, char *argv[]) {
   string fct_path = log_dir + "/fct_output.txt";
 
   cout << "=== SimAI htsim Backend ===" << endl;
+  cout << "Topology: " << topo_name << endl;
   cout << "GPUs: " << gpu_num << endl;
-  cout << "Alpha (OCS circuits): " << params.alpha << endl;
   cout << "Link speed: " << params.speed << " Mbps" << endl;
-  cout << "Reconf delay: " << params.reconf_delay_us << " us" << endl;
+  if (g_topo_type == TOPO_MIXNET) {
+    cout << "Alpha (OCS circuits): " << params.alpha << endl;
+    cout << "Reconf delay: " << params.reconf_delay_us << " us" << endl;
+    cout << "ECS only: " << (params.ecs_only ? "YES" : "NO") << endl;
+  }
   cout << "DP/TP/PP/EP: " << params.dp_degree << "/" << params.tp_degree
        << "/" << params.pp_degree << "/" << params.ep_degree << endl;
   cout << "GPUs per server: " << params.gpus_per_server << endl;
   cout << "Iterations: " << params.iterations << endl;
-  cout << "ECS only: " << (params.ecs_only ? "YES" : "NO") << endl;
   cout << "Workload: " << params.workload << endl;
   cout << "==========================" << endl;
 
@@ -365,64 +390,110 @@ int main(int argc, char *argv[]) {
   eventlist.setEndtime(timeFromSec(2000000));
   g_eventlist = &eventlist;
 
-  // 2. Compute FatTree size (round up to valid K^3/4 size)
+  // 2. Compute machine count and FatTree K parameter
   int num_machines = gpu_num / params.gpus_per_server;
   int fattree_node = num_machines;
+  int fattree_k = 0;
   {
     int k = 0;
     while (k * k * k / 4 < num_machines) {
       k += 2;
     }
+    fattree_k = k;
     fattree_node = k * k * k / 4;
   }
 
-  // ECS link speed: each machine has (8-alpha) ports for ECS
-  uint32_t ecs_link_speed = params.speed * (8 - params.alpha);
+  // 3. Create topology based on --topo
+  Mixnet* mixnet = nullptr;
+  FatTreeTopology* fattree = nullptr;
+  cout << "[htsim] Machines: " << num_machines << " FatTree K=" << fattree_k
+       << " FatTree nodes: " << fattree_node << endl;
 
-  cout << "[htsim] Machines: " << num_machines
-       << " FatTree nodes: " << fattree_node
-       << " ECS link speed: " << ecs_link_speed << " Mbps" << endl;
+  if (g_topo_type == TOPO_MIXNET) {
+    // OCS-ECS hybrid: FatTree (partial BW) + Mixnet OCS overlay
+    uint32_t ecs_link_speed = params.speed * (8 - params.alpha);
+    cout << "[htsim] ECS link speed: " << ecs_link_speed << " Mbps" << endl;
 
-  // 3. Create ECS Fat-tree topology
-  FatTreeTopology* fattree = new FatTreeTopology(
-      fattree_node,
-      memFromPkt(params.queuesize_pkts),
-      NULL, &eventlist, NULL, LOSSLESS_INPUT_ECN, ecs_link_speed);
-  g_fattree_topo = fattree;
-  cout << "[htsim] FatTree topology created" << endl;
+    fattree = new FatTreeTopology(
+        fattree_node, memFromPkt(params.queuesize_pkts),
+        NULL, &eventlist, NULL, LOSSLESS_INPUT_ECN, ecs_link_speed);
+    g_fattree_topo = fattree;
 
-  // 4. Create OCS-ECS hybrid Mixnet topology
-  Mixnet* mixnet = new Mixnet(
-      gpu_num,
-      memFromPkt(params.queuesize_pkts),
-      NULL, eventlist, NULL, ECN,
-      timeFromUs((double)params.reconf_delay_us),
-      fattree,
-      params.alpha,
-      params.dp_degree,
-      params.tp_degree,
-      params.pp_degree,
-      params.ep_degree);
-  g_mixnet_topo = mixnet;
-  cout << "[htsim] Mixnet topology created: region_size=" << mixnet->region_size
-       << " region_num=" << mixnet->region_num << endl;
+    mixnet = new Mixnet(
+        gpu_num, memFromPkt(params.queuesize_pkts),
+        NULL, eventlist, NULL, ECN,
+        timeFromUs((double)params.reconf_delay_us),
+        fattree, params.alpha,
+        params.dp_degree, params.tp_degree, params.pp_degree, params.ep_degree);
+    g_mixnet_topo = mixnet;
+    g_topology = mixnet;
 
-  // 5. Create TCP scanner, traffic recorder, and FCT output
+    cout << "[htsim] Mixnet topology created: region_size=" << mixnet->region_size
+         << " region_num=" << mixnet->region_num << endl;
+
+  } else if (g_topo_type == TOPO_FATTREE) {
+    // Full-bandwidth fat-tree (all 8 ports)
+    uint32_t full_speed = params.speed * 8;
+    fattree = new FatTreeTopology(
+        fattree_node, memFromPkt(params.queuesize_pkts),
+        NULL, &eventlist, NULL, LOSSLESS_INPUT_ECN, full_speed);
+    g_fattree_topo = fattree;
+    g_topology = fattree;
+    cout << "[htsim] FatTree topology created (full BW: " << full_speed << " Mbps)" << endl;
+
+  } else if (g_topo_type == TOPO_OS_FATTREE) {
+    int racksz = params.os_ratio;  // hosts per rack / uplinks per rack
+    auto* top = new OverSubscribedFatTree(
+        fattree_k, racksz, memFromPkt(params.queuesize_pkts),
+        NULL, &eventlist, NULL, LOSSLESS_INPUT_ECN);
+    g_topology = top;
+    cout << "[htsim] OverSubscribedFatTree created (K=" << fattree_k << " racksz=" << racksz << ")" << endl;
+
+  } else if (g_topo_type == TOPO_AGG_OS_FATTREE) {
+    int racksz = params.os_ratio;
+    auto* top = new AggOverSubscribedFatTree(
+        fattree_k, racksz, memFromPkt(params.queuesize_pkts),
+        NULL, &eventlist, NULL, LOSSLESS_INPUT_ECN);
+    g_topology = top;
+    cout << "[htsim] AggOverSubscribedFatTree created (K=" << fattree_k << " racksz=" << racksz << ")" << endl;
+
+  } else if (g_topo_type == TOPO_FC) {
+    auto* top = new FCTopology(
+        num_machines, memFromPkt(params.queuesize_pkts),
+        NULL, &eventlist, NULL, ECN);
+    g_topology = top;
+    cout << "[htsim] FCTopology created (" << num_machines << " nodes, ECN queuesize=" << params.queuesize_pkts << "pkts)" << endl;
+
+  } else if (g_topo_type == TOPO_FLAT) {
+    auto* top = new FlatTopology(
+        num_machines, memFromPkt(params.queuesize_pkts),
+        NULL, &eventlist, NULL, ECN);
+    g_topology = top;
+    cout << "[htsim] FlatTopology created (" << num_machines << " nodes, ECN queuesize=" << params.queuesize_pkts << "pkts)" << endl;
+  }
+
+  // 4. Create TCP scanner and FCT output
   TcpRtxTimerScanner tcpRtxScanner(timeFromMs(1), eventlist);
   g_tcp_scanner = &tcpRtxScanner;
   init_fct_output(fct_path);
 
-  int layer_num = 200;  // max layers
-  All2AllTrafficRecorder demand_recorder(
-      layer_num, mixnet->region_num, mixnet->region_size, &tcpRtxScanner);
-  g_demand_recorder = &demand_recorder;
+  // 5. Mixnet-specific: traffic recorder and topo manager
+  // Use unique_ptr-like pattern with raw pointers for stack lifetime
+  All2AllTrafficRecorder* _demand_recorder_storage = nullptr;
+  MixnetTopoManager* _topomanager_storage = nullptr;
 
-  // 5. Create topo manager
-  MixnetTopoManager topomanager(
-      mixnet, &demand_recorder,
-      timeFromUs((double)params.reconf_delay_us), eventlist);
-  g_topomanager = &topomanager;
-  cout << "[htsim] MixnetTopoManager created" << endl;
+  if (g_topo_type == TOPO_MIXNET && mixnet != nullptr) {
+    int layer_num = 200;
+    _demand_recorder_storage = new All2AllTrafficRecorder(
+        layer_num, mixnet->region_num, mixnet->region_size, &tcpRtxScanner);
+    g_demand_recorder = _demand_recorder_storage;
+
+    _topomanager_storage = new MixnetTopoManager(
+        mixnet, _demand_recorder_storage,
+        timeFromUs((double)params.reconf_delay_us), eventlist);
+    g_topomanager = _topomanager_storage;
+    cout << "[htsim] MixnetTopoManager created" << endl;
+  }
 
   // 6. Initialize port numbers
   for (int i = 0; i < nodes_num; i++) {
@@ -504,75 +575,87 @@ int main(int argc, char *argv[]) {
   cout << "Final time: " << timeAsMs(eventlist.now()) << " ms ("
        << timeAsSec(eventlist.now()) << " s)" << endl;
 
-  // 10. Print OCS/ECS statistics
+  // 10. Print flow statistics
   cout << endl;
-  cout << "======== OCS/ECS Flow Statistics ========" << endl;
-  cout << "OCS flows:    " << g_flow_count_ocs << " (" << g_flow_bytes_ocs << " bytes)" << endl;
-  cout << "ECS flows:    " << g_flow_count_ecs << " (" << g_flow_bytes_ecs << " bytes)" << endl;
-  cout << "NVLink flows: " << g_flow_count_nvlink << " (" << g_flow_bytes_nvlink << " bytes)" << endl;
-  cout << "Deferred flows (reconf): " << g_flow_count_deferred << endl;
+  cout << "======== Flow Statistics ========" << endl;
+  if (g_topo_type == TOPO_MIXNET) {
+    cout << "OCS flows:    " << g_flow_count_ocs << " (" << g_flow_bytes_ocs << " bytes)" << endl;
+  }
+  cout << "Network flows: " << g_flow_count_ecs << " (" << g_flow_bytes_ecs << " bytes)" << endl;
+  cout << "NVLink flows:  " << g_flow_count_nvlink << " (" << g_flow_bytes_nvlink << " bytes)" << endl;
+  if (g_topo_type == TOPO_MIXNET) {
+    cout << "Deferred flows (reconf): " << g_flow_count_deferred << endl;
+  }
   uint64_t total_flows = g_flow_count_ocs + g_flow_count_ecs + g_flow_count_nvlink;
-  if (total_flows > 0) {
-    cout << "OCS ratio: " << (100.0 * g_flow_count_ocs / total_flows) << "%" << endl;
-    cout << "ECS ratio: " << (100.0 * g_flow_count_ecs / total_flows) << "%" << endl;
-    cout << "NVLink ratio: " << (100.0 * g_flow_count_nvlink / total_flows) << "%" << endl;
-  }
-  // Print OCS connection matrix state
-  if (mixnet != nullptr) {
-    cout << endl << "OCS Connection Matrix:" << endl;
-    for (int i = 0; i < num_machines; i++) {
-      for (int j = 0; j < num_machines; j++) {
-        cout << mixnet->conn[i][j] << " ";
-      }
-      cout << endl;
-    }
-  }
   cout << "========================================" << endl;
 
   // Write stats.txt summary
   {
     ofstream stats(log_dir + "/stats.txt");
     stats << "======== Run Configuration ========" << endl;
+    stats << "Topology: " << topo_name << endl;
     stats << "GPUs: " << gpu_num << endl;
     stats << "TP: " << params.tp_degree << "  PP: " << params.pp_degree
           << "  EP: " << params.ep_degree << "  DP: " << params.dp_degree << endl;
     stats << "Iterations: " << params.iterations << endl;
-    stats << "Network: " << net_mode << (params.ecs_only ? " (ECS only)" : " (OCS+ECS mixnet)") << endl;
-    stats << "Alpha (OCS circuits): " << params.alpha << endl;
     stats << "Link speed: " << params.speed << " Mbps" << endl;
-    stats << "ECS link speed: " << ecs_link_speed << " Mbps" << endl;
-    stats << "Machines: " << num_machines << "  FatTree nodes: " << fattree_node << endl;
-    stats << "Queue type (ECS): LOSSLESS_INPUT_ECN" << endl;
-    stats << "Queue type (OCS): ECN" << endl;
+    stats << "Machines: " << num_machines << endl;
+    if (g_topo_type == TOPO_MIXNET) {
+      stats << "Network mode: " << (params.ecs_only ? "ECS only" : "OCS+ECS mixnet") << endl;
+      stats << "Alpha (OCS circuits): " << params.alpha << endl;
+      uint32_t ecs_link_speed = params.speed * (8 - params.alpha);
+      stats << "ECS link speed: " << ecs_link_speed << " Mbps" << endl;
+      stats << "Queue type (ECS): LOSSLESS_INPUT_ECN" << endl;
+      stats << "Queue type (OCS): ECN" << endl;
+    } else if (g_topo_type == TOPO_FATTREE) {
+      stats << "FatTree link speed: " << (params.speed * 8) << " Mbps" << endl;
+      stats << "FatTree nodes: " << fattree_node << "  K=" << fattree_k << endl;
+      stats << "Queue type: LOSSLESS_INPUT_ECN" << endl;
+    } else if (g_topo_type == TOPO_OS_FATTREE || g_topo_type == TOPO_AGG_OS_FATTREE) {
+      stats << "K=" << fattree_k << "  OS ratio=" << params.os_ratio << endl;
+      stats << "Queue type: LOSSLESS_INPUT_ECN" << endl;
+    } else {
+      stats << "Nodes: " << num_machines << endl;
+    }
     stats << endl;
 
     stats << "======== Flow Statistics ========" << endl;
-    stats << "OCS flows:    " << g_flow_count_ocs << " (" << g_flow_bytes_ocs << " bytes, "
-          << (g_flow_bytes_ocs / 1048576.0) << " MB)" << endl;
-    stats << "ECS flows:    " << g_flow_count_ecs << " (" << g_flow_bytes_ecs << " bytes, "
+    if (g_topo_type == TOPO_MIXNET) {
+      stats << "OCS flows:    " << g_flow_count_ocs << " (" << g_flow_bytes_ocs << " bytes, "
+            << (g_flow_bytes_ocs / 1048576.0) << " MB)" << endl;
+    }
+    stats << "Network flows: " << g_flow_count_ecs << " (" << g_flow_bytes_ecs << " bytes, "
           << (g_flow_bytes_ecs / 1048576.0) << " MB)" << endl;
-    stats << "NVLink flows: " << g_flow_count_nvlink << " (" << g_flow_bytes_nvlink << " bytes, "
+    stats << "NVLink flows:  " << g_flow_count_nvlink << " (" << g_flow_bytes_nvlink << " bytes, "
           << (g_flow_bytes_nvlink / 1048576.0) << " MB)" << endl;
-    stats << "Deferred flows (reconf): " << g_flow_count_deferred << endl;
+    if (g_topo_type == TOPO_MIXNET) {
+      stats << "Deferred flows (reconf): " << g_flow_count_deferred << endl;
+    }
     if (total_flows > 0) {
       stats << endl;
       stats << "Flow count ratio:" << endl;
-      stats << "  OCS:    " << (100.0 * g_flow_count_ocs / total_flows) << "%" << endl;
-      stats << "  ECS:    " << (100.0 * g_flow_count_ecs / total_flows) << "%" << endl;
-      stats << "  NVLink: " << (100.0 * g_flow_count_nvlink / total_flows) << "%" << endl;
+      if (g_topo_type == TOPO_MIXNET) {
+        stats << "  OCS:     " << (100.0 * g_flow_count_ocs / total_flows) << "%" << endl;
+      }
+      stats << "  Network: " << (100.0 * g_flow_count_ecs / total_flows) << "%" << endl;
+      stats << "  NVLink:  " << (100.0 * g_flow_count_nvlink / total_flows) << "%" << endl;
       uint64_t total_bytes = g_flow_bytes_ocs + g_flow_bytes_ecs + g_flow_bytes_nvlink;
       if (total_bytes > 0) {
         stats << endl;
         stats << "Bytes ratio:" << endl;
-        stats << "  OCS:    " << (100.0 * g_flow_bytes_ocs / total_bytes) << "%" << endl;
-        stats << "  ECS:    " << (100.0 * g_flow_bytes_ecs / total_bytes) << "%" << endl;
-        stats << "  NVLink: " << (100.0 * g_flow_bytes_nvlink / total_bytes) << "%" << endl;
-        uint64_t cross_machine_bytes = g_flow_bytes_ocs + g_flow_bytes_ecs;
-        if (cross_machine_bytes > 0) {
-          stats << endl;
-          stats << "Cross-machine bytes ratio (OCS vs ECS):" << endl;
-          stats << "  OCS: " << (100.0 * g_flow_bytes_ocs / cross_machine_bytes) << "%" << endl;
-          stats << "  ECS: " << (100.0 * g_flow_bytes_ecs / cross_machine_bytes) << "%" << endl;
+        if (g_topo_type == TOPO_MIXNET) {
+          stats << "  OCS:     " << (100.0 * g_flow_bytes_ocs / total_bytes) << "%" << endl;
+        }
+        stats << "  Network: " << (100.0 * g_flow_bytes_ecs / total_bytes) << "%" << endl;
+        stats << "  NVLink:  " << (100.0 * g_flow_bytes_nvlink / total_bytes) << "%" << endl;
+        if (g_topo_type == TOPO_MIXNET) {
+          uint64_t cross_machine_bytes = g_flow_bytes_ocs + g_flow_bytes_ecs;
+          if (cross_machine_bytes > 0) {
+            stats << endl;
+            stats << "Cross-machine bytes ratio (OCS vs ECS):" << endl;
+            stats << "  OCS: " << (100.0 * g_flow_bytes_ocs / cross_machine_bytes) << "%" << endl;
+            stats << "  ECS: " << (100.0 * g_flow_bytes_ecs / cross_machine_bytes) << "%" << endl;
+          }
         }
       }
     }
@@ -597,8 +680,11 @@ int main(int argc, char *argv[]) {
   for (int j = 0; j < nodes_num; j++) {
     delete networks[j];
   }
+  delete _topomanager_storage;
+  delete _demand_recorder_storage;
   delete mixnet;
   delete fattree;
+  // Note: non-mixnet topologies are cleaned up via g_topology if needed
 
   return 0;
 }

@@ -199,7 +199,7 @@ Queue *FlatTopology::alloc_queue(QueueLogger *queueLogger, uint64_t speed, mem_b
   else if (qt == CTRL_PRIO)
     return new CtrlPrioQueue(speedFromMbps(speed), queuesize, *eventlist, queueLogger);
   else if (qt == ECN)
-    return new ECNQueue(speedFromMbps(speed), memFromPkt(queuesize), *eventlist, queueLogger, memFromPkt(50));
+    return new ECNQueue(speedFromMbps(speed), queuesize, *eventlist, queueLogger, memFromPkt(50));
   else if (qt == LOSSLESS)
     return new LosslessQueue(speedFromMbps(speed), memFromPkt(50), *eventlist, queueLogger, NULL);
   else if (qt == LOSSLESS_INPUT)
@@ -286,7 +286,7 @@ void FlatTopology::init_network()
 }
 
 // ???
-void check_non_null(Route *rt)
+static void check_non_null(Route *rt)
 {
   int fail = 0;
   for (unsigned int i = 1; i < rt->size() - 1; i += 2)

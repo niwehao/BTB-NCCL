@@ -1,0 +1,10 @@
+{
+  "topology": {
+    "type": "fc",
+    "speed": 100000,
+    "queuesize": 200
+  },
+  "simulation": {
+    "iterations": 1
+  }
+}

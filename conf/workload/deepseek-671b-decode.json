@@ -1,0 +1,16 @@
+{
+  "model": {
+    "name": "DeepSeek-671B",
+    "model_size": "deepseek-671B",
+    "world_size": 64,
+    "tp_degree": 8,
+    "pp_degree": 2,
+    "dp_degree": 1,
+    "ep_degree": 4,
+    "gpus_per_server": 8,
+    "phase": "decode",
+    "seq_length": 1024,
+    "micro_batch": 1,
+    "workload": "SimAI/aicb/results/workload/DeepSeek-671B-world_size64-tp8-pp2-ep4-bs32-seq1-decode.txt"
+  }
+}

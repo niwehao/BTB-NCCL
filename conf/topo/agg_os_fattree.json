@@ -1,0 +1,11 @@
+{
+  "topology": {
+    "type": "agg_os_fattree",
+    "speed": 100000,
+    "queuesize": 8,
+    "os_ratio": 2
+  },
+  "simulation": {
+    "iterations": 1
+  }
+}

@@ -1,265 +1,332 @@
-# SimAI + htsim OCS-ECS Mixnet 使用手册
+# SimAI-mixnet 使用手册
 
-## 项目路径
+## 文件结构
 
 ```
-/Users/apple/Project/nccl/SimAI-mixnet/
-├── simai_htsim                      # 编译好的模拟器二进制
-├── build_htsim/                     # 编译产出的 .o 文件
-├── log/                             # 运行日志输出目录
-│   └── EP_x_TP_x_DP_x_PP_x_{OCS|ECS}_GPUx_iterX_MMDD_HHMMSS/
-│       ├── trace.log                # 完整运行日志 (含 pass 时间、事件计数)
-│       ├── stats.txt                # 统计摘要 (配置、流量分布、字节占比)
-│       └── fct_output.txt           # 每条 TCP flow 的完成时间
+SimAI-mixnet/
+├── simai_htsim                        # 模拟器二进制
+├── build.sh                           # 编译脚本
+├── run.sh                             # 一站式运行脚本 (读 JSON 配置)
+├── build_htsim/                       # 编译中间产物
+├── conf/                              # JSON 配置文件
+│   ├── topo/                          # 拓扑配置
+│   │   ├── mixnet.json                # OCS-ECS 混合拓扑
+│   │   ├── fattree.json               # 全带宽 fat-tree
+│   │   ├── os_fattree.json            # 过量订阅 fat-tree
+│   │   ├── agg_os_fattree.json        # 聚合过量订阅 fat-tree
+│   │   ├── fc.json                    # Full circuit 全连接
+│   │   └── flat.json                  # Flat 扁平拓扑
+│   └── workload/                      # workload 配置
+│       ├── deepseek-671b-decode.json  # DeepSeek 推理 decode
+│       └── deepseek-671b-train.json   # DeepSeek 训练
+├── log/                               # 运行日志
+│   └── {topo}_{MMDD_HHMMSS}/
+│       ├── trace.log                  # 完整运行日志
+│       ├── stats.txt                  # 统计摘要
+│       ├── fct_output.txt             # TCP flow 完成时间
+│       ├── topo.json                  # 本次运行的拓扑配置副本
+│       ├── workload.json              # 本次运行的 workload 配置副本
+│       └── ncclFlowModel_EndToEnd.csv # 通信层分维度时间分解
 ├── SimAI/
-│   ├── aicb/                        # AICB workload 生成器
-│   │   ├── workload_generator/
-│   │   │   ├── SimAI_inference_workload_generator.py   # 推理(decode/prefill)
-│   │   │   └── SimAI_training_workload_generator.py    # 训练
-│   │   ├── scripts/inference_configs/
-│   │   │   └── deepseek_default.json                   # DeepSeek-671B 模型参数
-│   │   └── results/workload/                           # 生成的 workload 输出目录
+│   ├── aicb/                          # AICB workload 生成器
+│   │   ├── scripts/
+│   │   │   ├── inference_workload_with_aiob.sh
+│   │   │   └── inference_configs/deepseek_default.json
+│   │   └── results/workload/          # 生成的 workload 文件
 │   └── astra-sim-alibabacloud/
 │       └── astra-sim/
 │           ├── network_frontend/htsim/
-│           │   ├── AstraSimNetwork.cc   # 网络前端(CLI参数解析、日志目录创建、统计输出)
-│           │   └── entry.h              # OCS/ECS 选路逻辑 + 流量统计计数器
-│           ├── system/Sys.cc            # 系统层(PP_size修复)
-│           └── workload/Workload.cc     # workload解析
+│           │   ├── AstraSimNetwork.cc # 主入口 (CLI、拓扑工厂、日志)
+│           │   └── entry.h            # 多拓扑选路 + SendFlow
+│           └── workload/Workload.cc   # workload 解析
 └── mixnet-sim/
     └── mixnet-htsim/src/clos/
-        ├── datacenter/
-        │   ├── mixnet.cpp               # OCS 拓扑 + get_paths() 路由
-        │   ├── mixnet.h
-        │   └── fat_tree_topology.cpp    # ECS fat-tree 拓扑
-        ├── mixnet_topomanager.cpp       # OCS 重配置管理 (贪心分配、immediate reconfig)
-        ├── ecnqueue.cpp                 # ECN 队列 (OCS 链路使用)
-        ├── queue_lossless_output.cpp    # Lossless+ECN 队列 (ECS fat-tree 使用)
-        └── tcp.h / tcp.cpp              # TCP/DCTCP 传输层
+        └── datacenter/
+            ├── topology.h             # 拓扑基类
+            ├── mixnet.cpp/.h          # OCS-ECS 混合拓扑
+            ├── fat_tree_topology.cpp  # Fat-tree
+            ├── os_fattree.cpp         # Oversubscribed fat-tree
+            ├── agg_os_fattree.cpp     # Aggregated oversubscribed fat-tree
+            ├── fc_topology.cpp        # Full circuit
+            └── flat_topology.cpp      # Flat
 ```
 
----
+## 使用方法
 
-## 一、编译
-
-### 增量编译 (推荐)
-
-只重编译改动的文件，然后重新链接：
+### 编译
 
 ```bash
-HTSIM_SRC="/Users/apple/Project/nccl/SimAI-mixnet/mixnet-sim/mixnet-htsim/src/clos"
-FLATBUF_INC="/opt/homebrew/Cellar/flatbuffers/25.12.19/include"
-SIMAI_SRC="/Users/apple/Project/nccl/SimAI-mixnet/SimAI/astra-sim-alibabacloud"
-BUILD="/Users/apple/Project/nccl/SimAI-mixnet/build_htsim"
-
-# 编译改动的源文件 (按需替换文件名)
-g++ -Wall -std=c++17 -O0 -g \
-    -I${HTSIM_SRC} -I${HTSIM_SRC}/datacenter -I${FLATBUF_INC} -I${SIMAI_SRC} \
-    -c ${SIMAI_SRC}/astra-sim/network_frontend/htsim/AstraSimNetwork.cc \
-    -o ${BUILD}/SimAI/astra-sim-alibabacloud/astra-sim/network_frontend/htsim/AstraSimNetwork.cc.o
-
-# 链接 (排除 main_tcp_mixnet.cpp.o，它是独立测试入口)
-g++ -std=c++17 -O0 -g \
-    $(find $BUILD -name "*.o" ! -name "main_tcp_mixnet.cpp.o") \
-    -o /Users/apple/Project/nccl/SimAI-mixnet/simai_htsim
+./build.sh              # 单线程编译
+./build.sh -j 8         # 8 线程并行
+./run.sh --build-only   # 通过 run.sh 编译
 ```
 
-**注意**: entry.h 是头文件，修改后需手动重编译 AstraSimNetwork.cc.o
-
-产出: `./simai_htsim`
-
----
-
-## 二、AICB 生成 Workload
-
-**环境**: conda myenv (torch 2.0.1，仅用于模型参数计算，不跑 GPU)
+### 运行 (推荐: 通过 JSON 配置)
 
 ```bash
-source ~/miniconda3/etc/profile.d/conda.sh && conda activate myenv
-cd /Users/apple/Project/nccl/SimAI-mixnet/SimAI/aicb
+# 单拓扑运行
+./run.sh conf/topo/fattree.json conf/workload/deepseek-671b-decode.json
+./run.sh conf/topo/fattree.json conf/workload/deepseek-671b-decode.json --skip-build
+
+# 多拓扑批量运行 (同一个 workload, 指定多个拓扑)
+./run.sh conf/topo/fattree.json conf/topo/mixnet.json conf/topo/fc.json conf/workload/deepseek-671b-decode.json
+
+# 全部拓扑测试
+./run.sh --test-all                                        # 用第一个 workload
+./run.sh --test-all conf/workload/deepseek-671b-train.json # 指定 workload
+
+# 强制重新生成 workload
+./run.sh conf/topo/fc.json conf/workload/deepseek-671b-decode.json --gen-workload
 ```
 
-### 2.1 推理 Decode Workload
+### 运行 (直接 CLI)
 
 ```bash
-python -m workload_generator.SimAI_inference_workload_generator \
-    DeepSeek-671B \
-    scripts/inference_configs/deepseek_default.json \
-    --world_size=64 \
-    --tensor_model_parallel_size=8 \
-    --pipeline_model_parallel=2 \
-    --expert_model_parallel_size=4 \
-    --micro_batch=32 \
-    --seq_length=1
+./simai_htsim -w workload.txt --topo fattree --nodes 64 \
+  --tp_degree 8 --pp_degree 2 --ep_degree 4 --dp_degree 1 \
+  --gpus_per_server 8 --speed 100000 --iterations 1
 ```
 
-- 输出: `results/workload/DeepSeek-671B-world_size64-tp8-pp2-ep4-bs32-seq1-decode.txt`
-- 238 layers, mode=1 (inference), 无 wg 通信
-- `--phase=prefill` 可切换到 prefill 阶段
+## JSON 配置格式
 
-### 2.2 训练 Training Workload
+配置分为两个文件：**拓扑配置** (`conf/topo/`) 和 **workload 配置** (`conf/workload/`)。
+
+### 拓扑配置 (conf/topo/*.json)
+
+```json
+{
+  "topology": {
+    "type": "fattree",
+    "speed": 100000,
+    "queuesize": 8
+  },
+  "simulation": {
+    "iterations": 1
+  }
+}
+```
+
+### Workload 配置 (conf/workload/*.json)
+
+```json
+{
+  "model": {
+    "name": "DeepSeek-671B",
+    "model_size": "deepseek-671B",
+    "world_size": 64,
+    "tp_degree": 8,
+    "pp_degree": 2,
+    "dp_degree": 1,
+    "ep_degree": 4,
+    "gpus_per_server": 8,
+    "phase": "decode",
+    "seq_length": 1024,
+    "micro_batch": 1,
+    "workload": "SimAI/aicb/results/workload/xxx.txt"
+  }
+}
+```
+
+### model 参数
+
+| 参数 | 说明 | 用途 |
+|------|------|------|
+| name | 模型名称 | 标识 |
+| model_size | AICB 模型预设 (deepseek-671B 等) | workload 生成 |
+| world_size | 总 GPU 数 | 传递给 --nodes |
+| tp/pp/dp/ep_degree | 并行度 | 传递给 simai_htsim |
+| gpus_per_server | 每台服务器 GPU 数 | 机器数 = world_size / gpus_per_server |
+| phase | decode / prefill / train | workload 生成 |
+| seq_length | 序列长度 | workload 生成 |
+| micro_batch | 微批大小 | workload 生成 |
+| workload | workload 文件路径 | 为空则自动生成 |
+
+### topology 参数
+
+| 参数 | 适用拓扑 | 说明 | 默认值 |
+|------|---------|------|--------|
+| type | 全部 | mixnet / fattree / os_fattree / agg_os_fattree / fc / flat | fattree |
+| speed | 全部 | 链路速率 Mbps | 100000 |
+| queuesize | 全部 | 队列大小 (packets) | 8 |
+| alpha | mixnet | 每台机器 OCS 电路数 | 4 |
+| reconf_delay | mixnet | OCS 重配延迟 (us) | 10 |
+| ecs_only | mixnet | 强制 ECS 模式 | false |
+| os_ratio | os_fattree / agg_os_fattree | 过量订阅比 | 2 |
+
+### simulation 参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| iterations | 模拟迭代次数 | 1 |
+
+## 拓扑说明
+
+| 拓扑 | --topo | 队列类型 | 有效带宽 |
+|------|--------|---------|---------|
+| OCS-ECS 混合 | mixnet | OCS: ECN, ECS: LOSSLESS_INPUT_ECN | OCS: alpha×speed, ECS: (8-alpha)×speed |
+| Fat-tree | fattree | LOSSLESS_INPUT_ECN | 8×speed |
+| Oversubscribed fat-tree | os_fattree | LOSSLESS_INPUT_ECN | speed (有过量订阅) |
+| Agg oversubscribed fat-tree | agg_os_fattree | LOSSLESS_INPUT_ECN | speed (有过量订阅) |
+| Full circuit | fc | ECN | speed (点对点) |
+| Flat | flat | ECN | speed (点对点) |
+
+## 拓扑架构生成
+
+所有拓扑的机器数由并行参数推导：`num_machines = world_size / gpus_per_server`。
+
+以下以默认 decode 配置为例：64 GPU, 8 GPU/server = **8 台机器**, tp=8, pp=2, ep=4, dp=1。
+
+### Fat-tree (fattree)
+
+**K 值计算**：最小偶数 K 使得 K³/4 ≥ num_machines。8 台机器 → K=4（4³/4=16 ≥ 8）。
+
+**交换机结构**（三层 Clos）：
+
+| 层级 | 数量 | 公式 |
+|------|------|------|
+| ToR (接入层) | 8 | K²/2 |
+| Agg (汇聚层) | 8 | K²/2 |
+| Core (核心层) | 4 | K²/4 |
+
+**连接方式**：
+- 每个 ToR 连接 K/2=2 台机器（下行）+ K/2=2 个 Agg 交换机（上行）
+- 每个 Agg 连接 K/2=2 个 ToR（下行）+ K/2=2 个 Core（上行）
+- Pod 数 = K = 4，每 Pod 含 K/2=2 个 ToR + K/2=2 个 Agg
+
+**链路速率**：speed × 8 = 800 Gbps（8 端口聚合带宽）
+
+**路由**：同 ToR 直达；同 Pod 经 Agg ECMP；跨 Pod 经 Core 转发。
+
+```
+          [Core 0] [Core 1] [Core 2] [Core 3]
+            / \      / \      / \      / \
+      ┌────┘   └──┐ ...                    
+   [Agg0] [Agg1] [Agg2] [Agg3] ... [Agg6] [Agg7]
+    / \    / \    / \    / \          / \    / \
+ [ToR0][ToR1][ToR2][ToR3]  ...   [ToR6][ToR7]
+   |  |   |  |   |  |   |  |       |  |   |  |
+  M0  M1  M2  M3  M4  M5  M6  M7  ...  (8台机器使用前8个位置)
+```
+
+### Oversubscribed Fat-tree (os_fattree)
+
+与 Fat-tree 相同的 K=4 三层结构，但引入过量订阅。
+
+**参数**：Nhpr = os_ratio = 2（每 ToR 下挂主机数）
+
+| 层级 | 数量 | 公式 |
+|------|------|------|
+| ToR | 8 | K²/2 |
+| Agg | 8 | K × (K - Nhpr) |
+| Core | 4 | Nup/2 |
+
+**过量订阅**：每 ToR 有 Nhpr=2 个下行端口连主机，(K-Nhpr)=2 个上行端口连 Agg。下行总带宽 = 上行总带宽，实际无过量订阅（os_ratio=2 时刚好平衡）。os_ratio 越大，下行端口越多，上行比例越低。
+
+**链路速率**：所有链路 speed = 100 Gbps。
+
+### Aggregated Oversubscribed Fat-tree (agg_os_fattree)
+
+**参数**：Nhpr = K/2 = 2（固定），up_port = os_ratio = 2
+
+| 层级 | 数量 | 公式 |
+|------|------|------|
+| ToR | 8 | K²/2 |
+| Agg | 8 | K × up_port |
+| Core | 4 | Nup/2 |
+
+**与 os_fattree 的区别**：Agg 层分配方式不同。agg_os_fattree 每 Pod 分配 Nup/K=2 个 Agg 交换机，更均匀地分配汇聚层资源。
+
+**链路速率**：所有链路 speed = 100 Gbps。
+
+### Full Circuit (fc)
+
+**结构**：完全图，所有机器两两直连。
+
+- 节点数：8 台机器
+- 双向链路数：C(8,2) = 28 条
+- 每对机器之间一条独立链路
+
+**链路速率**：speed = 100 Gbps。
+
+**路由**：单跳直达，无中间交换机。
+
+```
+   M0 ──── M1
+  /|╲\    /|╲\
+ M2  M3──M4  M5
+  ╲|╱/    ╲|╱/
+   M6 ──── M7
+ (所有节点两两直连, 简化示意)
+```
+
+### Flat
+
+与 FC 结构相同（完全图），但支持从文件加载自定义拓扑矩阵。无自定义文件时退化为 FC。
+
+**链路速率**：speed = 100 Gbps。
+
+### OCS-ECS 混合 (mixnet)
+
+**区域划分**（基于并行度）：
+
+```
+region_size = (ep_degree × tp_degree) / gpus_per_server
+            = (4 × 8) / 8 = 4 台机器
+region_num  = num_machines / region_size
+            = 8 / 4 = 2 个区域
+```
+
+区域 0：机器 0-3，区域 1：机器 4-7
+
+**双层网络**：
+
+| 层 | 类型 | 覆盖范围 | 链路速率 |
+|----|------|---------|---------|
+| OCS 光层 | 区域内直连电路 | 同区域机器对 | speed × alpha = 400 Gbps |
+| ECS 电层 | Fat-tree 骨干 | 全局（跨区域） | speed × (8 - alpha) = 400 Gbps |
+
+- **OCS**：每台机器最多 alpha=4 条光电路连接同区域其他机器。连接矩阵 `conn[i][j]` 动态生成，仅区域内连接。
+- **ECS**：完整 Fat-tree（K=4），作为所有非 OCS 流量的回退路径。
+- 总带宽：OCS + ECS = 400 + 400 = 800 Gbps（与纯 Fat-tree 一致）。
+
+**路由决策**（entry.h）：
+- All-to-All 流量 + OCS 连接存在 → 走 OCS 光层
+- 其他流量（All-Reduce 等）→ 走 ECS Fat-tree
+- 区域正在重配置 → 延迟发送，等待重配完成
+
+**动态重配置**：All-to-All 层完成后，根据流量矩阵贪心重新分配 OCS 电路。
+
+```
+区域 0 (OCS 域)          区域 1 (OCS 域)
+┌─────────────────┐      ┌─────────────────┐
+│ M0 ⇄ M1         │      │ M4 ⇄ M5         │
+│ ↕╲ ╱↕           │      │ ↕╲ ╱↕           │
+│ M2 ⇄ M3         │      │ M6 ⇄ M7         │
+│ (alpha=4 OCS)   │      │ (alpha=4 OCS)   │
+└────────┬────────┘      └────────┬────────┘
+         │         ECS Fat-tree          │
+         └──────── (K=4 骨干) ──────────┘
+```
+
+## AICB Workload 生成
+
+workload 为空时 `run.sh --gen-workload` 自动调用 AICB 生成。也可手动：
 
 ```bash
+cd SimAI/aicb
+# 推理 decode
+bash scripts/inference_workload_with_aiob.sh \
+  --model_size deepseek-671B --phase decode \
+  --world_size 64 --tensor_model_parallel_size 8 \
+  --pipeline_model_parallel 2 --expert_model_parallel_size 4 \
+  --seq_length 1024 --micro_batch 32 \
+  --result_dir results/workload/
+
+# 训练 (需 conda myenv)
 python -m workload_generator.SimAI_training_workload_generator \
-    --frame=DeepSeek \
-    --model_name=DeepSeek-671B \
-    --world_size=1024 \
-    --tensor_model_parallel_size=8 \
-    --pipeline_model_parallel=8 \
-    --expert_model_parallel_size=8 \
-    --num_experts=288 \
-    --moe_router_topk=8 \
-    --num_layers=61 \
-    --hidden_size=7168 \
-    --num_attention_heads=128 \
-    --vocab_size=129280 \
-    --micro_batch=1 \
-    --global_batch=64 \
-    --seq_length=4096 \
-    --enable_sequence_parallel \
-    --moe_enable \
-    --n_shared_expert=1 \
-    --n_dense_layers=3 \
-    --qk_rope_dim=64 \
-    --qk_nope_dim=128 \
-    --q_lora_rank=1536 \
-    --kv_lora_rank=512 \
-    --v_head_dim=128 \
-    --workload_only
+  --frame DeepSeek --model_name DeepSeek-671B \
+  --world_size 64 --tensor_model_parallel_size 2 \
+  --pipeline_model_parallel 2 --expert_model_parallel_size 8 \
+  --seq_length 4096 --micro_batch 1 --global_batch 32 \
+  --moe_enable --workload_only
 ```
-
-### 2.3 关键注意事项
-
-- **不加 `--aiob_enable`**: 不跑 GPU，compute_time 用默认值 1 (仅测网络通信)
-- **必须 `--enable_sequence_parallel`**: MoE 模式强制要求
-- **训练生成器 bug fix**: 原代码 `SIMAI_workload(model, args, None)` 改为 `SIMAI_workload(model, args, {})` (第986行)
-
----
-
-## 三、运行模拟
-
-### 3.1 CLI 参数说明
-
-```
-./simai_htsim [options]
-  -w, --workload FILE     Workload 文件路径 (必须)
-  --nodes N               总 GPU 数 (default: 8)
-  --alpha N               每台机器最大 OCS 电路数 (default: 4)
-  --speed N               链路速率 Mbps (default: 100000, 即 100Gbps)
-  --reconf_delay N        OCS 重配延迟 us (default: 10)
-  --dp_degree N           DP 并行度 (default: 1)
-  --tp_degree N           TP 并行度 (default: 1)
-  --pp_degree N           PP 并行度 (default: 1)
-  --ep_degree N           EP 并行度 (default: 8)
-  --gpus_per_server N     每台服务器 GPU 数 (default: 8)
-  --queuesize N           队列大小 packets (default: 8)
-  --iterations N          迭代次数 (default: 1)
-  --ecs_only              强制所有流量走 ECS (禁用 OCS)
-```
-
-### 3.2 运行示例
-
-```bash
-BIN=/Users/apple/Project/nccl/SimAI-mixnet/simai_htsim
-WL=/Users/apple/Project/nccl/SimAI-mixnet/SimAI/aicb/results/workload/DeepSeek-671B-world_size64-tp8-pp2-ep4-bs32-seq1-decode.txt
-COMMON="--nodes=64 --tp_degree=8 --pp_degree=2 --ep_degree=4 --dp_degree=1 --gpus_per_server=8 --alpha=6 --speed=100000 --iterations=8"
-
-# OCS+ECS mixnet
-$BIN -w "$WL" $COMMON
-
-# ECS-only 对比
-$BIN -w "$WL" $COMMON --ecs_only
-```
-
-### 3.3 日志输出
-
-每次运行自动创建日志目录：
-```
-log/EP_4_TP_8_DP_1_PP_2_OCS_GPU64_iter8_0413_103406/
-├── trace.log        # 完整运行日志 (stdout)
-│                    #   - pass: X finished at time: Y
-│                    #   - [htsim] Events processed: ...
-│                    #   - [SendFlow] OCS/ECS/NVLink 前几条
-│                    #   - [RECONF] 重配置触发记录
-├── stats.txt        # 统计摘要
-│                    #   - 运行配置 (GPU数、并行度、网络模式、队列类型)
-│                    #   - 流统计 (OCS/ECS/NVLink 流数量、字节、MB)
-│                    #   - 流数量占比、字节占比
-│                    #   - 跨机器字节占比 (OCS vs ECS)
-│                    #   - 事件总数、模拟结束时间
-└── fct_output.txt   # 每条 TCP flow 完成记录
-```
-
-stderr 输出日志目录路径: `[LOG] Output directory: ...`
-
----
-
-## 四、网络拓扑架构
-
-### 4.1 队列类型
-
-- **ECS (fat-tree)**: `LOSSLESS_INPUT_ECN` — 无损 + ECN 标记，PFC 反压，不丢包
-- **OCS (直连)**: `ECN` — ECN 标记 + tail drop，点对点直连基本无拥塞
-
-### 4.2 OCS-ECS 选路规则
-
-```
-if (同机器):
-    走 NVLink (900Gbps)
-elif (comm_type == ALLTOALL_EP && OCS有可用电路 && !ecs_only模式):
-    走 OCS (直连, alpha×100G 带宽, 3跳)
-else:
-    走 ECS (fat-tree, (8-alpha)×100G 带宽, 9跳)
-```
-
-- 在 `entry.h` 中实现, 通过 `g_force_ecs_only` 全局变量控制 ECS-only 模式
-- OCS 电路按 EP region 动态分配: region_size = ep_degree × tp_degree / gpus_per_server
-- 当前只有 EP AllToAll (com_type==4) 走 OCS，PP 等其他跨机器流量走 ECS
-
-### 4.3 OCS 重配置机制
-
-- **触发条件**: 一层 AllToAll 的所有跨机器 flow 在某个 region 内全部传完
-- **流量矩阵**: 用当前层实际传输的 (src_machine, dst_machine, bytes) 构建
-- **贪心分配**: 每次选流量最大的机器对分配一条 OCS 电路，直到 alpha 条用完
-- **Immediate reconfig**: 暂停队列 → 直接重配置 → 恢复队列，不等排空 (避免死锁)
-- **路由保持**: 运行中的 TCP flow 保留旧路由，只有新 flow 使用新拓扑
-
-### 4.4 通信组到网络的映射
-
-| 通信组 | CommType | 跨机器? | 网络路径 |
-|--------|----------|---------|---------|
-| TP | ALLREDUCE/REDUCESCATTER/ALLGATHER | 否 (同机) | NVLink |
-| PP | pp_comm | 可能跨机 | ECS |
-| EP | ALLTOALL_EP | 是 | OCS 或 ECS |
-| DP | REDUCESCATTER/ALLGATHER | 是 | ECS |
-| DP_EP | REDUCESCATTER_DP_EP/ALLGATHER_DP_EP | 是 | ECS |
-
-### 4.5 关键参数关系
-
-- `region_size = ep_degree × tp_degree / gpus_per_server`
-- NVLink group = 8 GPU = 1台机器 (所有机内通信走 NVLink)
-- OCS 带宽 = alpha × speed (直连点对点)
-- ECS 带宽 = (8 - alpha) × speed (fat-tree 共享)
-
----
-
-## 五、Workload 文件格式
-
-### Header
-```
-HYBRID_TRANSFORMER_FWD_IN_BCKWD model_parallel_NPU_group: <TP> ep: <EP> pp: <PP> [vpp: <N>] [ga: <N>] all_gpus: <total> [mode: 1] checkpoints: 0 checkpoint_initiates: 0 pp_comm: <bytes>
-<num_layers>
-```
-- `mode: 1` = inference (仅 forward)
-- 无 `mode` = training (forward + backward)
-- `ga` = gradient accumulation steps
-- `vpp` = 训练时为 num_layers_per_stage, 推理时为 1
-
-### Layer 格式 (12 fields, tab-separated)
-```
-name  placeholder  fp_compute  fp_comm_type  fp_comm_size  ig_compute  ig_comm_type  ig_comm_size  wg_compute  wg_comm_type  wg_comm_size  wg_update_time
-```
-
-### CommType 映射
-- fp/ig 后缀: `ALLREDUCE` → TP组, `ALLTOALL_EP` → EP组, `REDUCESCATTER`/`ALLGATHER` → TP组
-- wg 后缀: `REDUCESCATTER`/`ALLGATHER` → DP组, `REDUCESCATTER_DP_EP`/`ALLGATHER_DP_EP` → DP_EP组
