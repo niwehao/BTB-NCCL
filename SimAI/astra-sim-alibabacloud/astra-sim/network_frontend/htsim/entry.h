@@ -85,6 +85,7 @@ TopoType g_topo_type = TOPO_MIXNET;
 // OCS/ECS config
 int g_gpus_per_server = 8;
 bool g_force_ecs_only = false;  // When true, all cross-machine traffic uses ECS
+int g_rto_ms = 1;  // TCP retransmission timeout in ms
 
 // FCT output stream for tcp.cpp (required by TcpSrc::receivePacket at flow completion)
 std::ofstream g_fct_output;
@@ -555,7 +556,7 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
 
   flowSrc->set_flowsize(maxPacketCount);
   flowSrc->set_ssthresh(65535 * Packet::data_packet_size());
-  flowSrc->_rto = timeFromMs(1);
+  flowSrc->_rto = timeFromMs(g_rto_ms);
   flowSrc->is_elec = !use_ocs;
   flowSrc->is_all2all = (com_type == 4);
 

@@ -1,5 +1,10 @@
 # SimAI-mixnet 使用手册
 
+## cache
+
+./run.sh conf/topo/os_fattree.json conf/topo/mixnet.json conf/topo/fattree.json conf/workload/mistral-8-7B-train.json
+./run.sh conf/topo/mixnet.json conf/topo/os_fattree.json conf/topo/fattree.json conf/workload/deepseek-671b-decode.json
+
 ## 文件结构
 
 ```
@@ -129,46 +134,80 @@ SimAI-mixnet/
 
 ### model 参数
 
-| 参数 | 说明 | 用途 |
-|------|------|------|
-| name | 模型名称 | 标识 |
-| model_size | AICB 模型预设 (deepseek-671B 等) | workload 生成 |
-| world_size | 总 GPU 数 | 传递给 --nodes |
-| tp/pp/dp/ep_degree | 并行度 | 传递给 simai_htsim |
-| gpus_per_server | 每台服务器 GPU 数 | 机器数 = world_size / gpus_per_server |
-| phase | decode / prefill / train | workload 生成 |
-| seq_length | 序列长度 | workload 生成 |
-| micro_batch | 微批大小 | workload 生成 |
-| workload | workload 文件路径 | 为空则自动生成 |
+| 参数               | 说明                     | 用途                                  |
+| ------------------ | ------------------------ | ------------------------------------- |
+| name               | 模型名称                 | 标识                                  |
+| world_size         | 总 GPU 数                | 传递给 --nodes                        |
+| tp/pp/dp/ep_degree | 并行度                   | 传递给 simai_htsim                    |
+| gpus_per_server    | 每台服务器 GPU 数        | 机器数 = world_size / gpus_per_server |
+| phase              | decode / prefill / train | 决定使用哪个 workload 生成器          |
+| seq_length         | 序列长度                 | workload 生成                         |
+| micro_batch        | 微批大小                 | workload 生成                         |
+| global_batch       | 全局批大小 (仅 train)    | workload 生成, 默认 32                |
+| workload           | workload 文件路径        | 为空则自动生成                        |
+
+### train 参数 (仅 phase=train 的 workload 配置)
+
+训练 workload 需要额外的 `train` 字段指定模型结构，所有参数均有 DeepSeek-671B 默认值：
+
+| 参数                     | 说明                 | 默认值        |
+| ------------------------ | -------------------- | ------------- |
+| frame                    | 训练框架             | DeepSeek      |
+| model_name               | 模型标识             | DeepSeek_671B |
+| num_layers               | 层数                 | 61            |
+| hidden_size              | 隐藏层维度           | 18432         |
+| num_attention_heads      | 注意力头数           | 128           |
+| ffn_hidden_size          | FFN 隐藏层维度       | 2048          |
+| vocab_size               | 词表大小             | 50257         |
+| max_position_embeddings  | 最大位置编码长度     | 4096          |
+| num_experts              | MoE 专家数           | 256           |
+| n_shared_expert          | 共享专家数           | 1             |
+| n_dense_layer            | 非 MoE 密集层数      | 3             |
+| q_lora_rank              | Q LoRA 秩            | 1536          |
+| kv_lora_rank             | KV LoRA 秩           | 512           |
+| qk_nope_dim              | QK NoPE 维度         | 128           |
+| qk_rope_dim              | QK RoPE 维度         | 64            |
+| v_head_dim               | V Head 维度          | 128           |
+| moe_router_topk          | 路由 Top-K           | null (不传)   |
+| epoch_num                | 训练轮数             | 1             |
+| moe_enable               | 启用 MoE             | true          |
+| enable_sequence_parallel | 启用序列并行         | true          |
+| swiglu                   | 启用 SwiGLU          | false         |
+| use_flash_attn           | 启用 Flash Attention | false         |
+| recompute_activations    | 启用激活重计算       | false         |
+| moe_grouped_gemm         | 启用分组 GEMM        | false         |
+
+推理 workload (decode/prefill) 不需要 `train` 字段，仅依赖 `model` 中的 `model_size` 预设（如 `deepseek-671B`）。
 
 ### topology 参数
 
-| 参数 | 适用拓扑 | 说明 | 默认值 |
-|------|---------|------|--------|
-| type | 全部 | mixnet / fattree / os_fattree / agg_os_fattree / fc / flat | fattree |
-| speed | 全部 | 链路速率 Mbps | 100000 |
-| queuesize | 全部 | 队列大小 (packets) | 8 |
-| alpha | mixnet | 每台机器 OCS 电路数 | 4 |
-| reconf_delay | mixnet | OCS 重配延迟 (us) | 10 |
-| ecs_only | mixnet | 强制 ECS 模式 | false |
-| os_ratio | os_fattree / agg_os_fattree | 过量订阅比 | 2 |
+| 参数         | 适用拓扑                    | 说明                                                       | 默认值  |
+| ------------ | --------------------------- | ---------------------------------------------------------- | ------- |
+| type         | 全部                        | mixnet / fattree / os_fattree / agg_os_fattree / fc / flat | fattree |
+| speed        | 全部                        | 链路速率 Mbps                                              | 100000  |
+| queuesize    | 全部                        | 队列大小 (packets)                                         | 8       |
+| alpha        | mixnet                      | 每台机器 OCS 电路数                                        | 4       |
+| reconf_delay | mixnet                      | OCS 重配延迟 (us)                                          | 10      |
+| ecs_only     | mixnet                      | 强制 ECS 模式                                              | false   |
+| os_ratio     | os_fattree / agg_os_fattree | 过量订阅比                                                 | 2       |
 
 ### simulation 参数
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| iterations | 模拟迭代次数 | 1 |
+| 参数       | 说明         | 默认值 |
+| ---------- | ------------ | ------ |
+| iterations | 模拟迭代次数 | 1      |
+| rto_ms     | TCP 超时重传时间 (ms) | 1      |
 
 ## 拓扑说明
 
-| 拓扑 | --topo | 队列类型 | 有效带宽 |
-|------|--------|---------|---------|
-| OCS-ECS 混合 | mixnet | OCS: ECN, ECS: LOSSLESS_INPUT_ECN | OCS: alpha×speed, ECS: (8-alpha)×speed |
-| Fat-tree | fattree | LOSSLESS_INPUT_ECN | 8×speed |
-| Oversubscribed fat-tree | os_fattree | LOSSLESS_INPUT_ECN | speed (有过量订阅) |
-| Agg oversubscribed fat-tree | agg_os_fattree | LOSSLESS_INPUT_ECN | speed (有过量订阅) |
-| Full circuit | fc | ECN | speed (点对点) |
-| Flat | flat | ECN | speed (点对点) |
+| 拓扑                        | --topo         | 队列类型                          | 有效带宽                                 |
+| --------------------------- | -------------- | --------------------------------- | ---------------------------------------- |
+| OCS-ECS 混合                | mixnet         | OCS: ECN, ECS: LOSSLESS_INPUT_ECN | OCS: alpha×speed, ECS: (8-alpha)×speed |
+| Fat-tree                    | fattree        | LOSSLESS_INPUT_ECN                | 8×speed                                 |
+| Oversubscribed fat-tree     | os_fattree     | LOSSLESS_INPUT_ECN                | speed (有过量订阅)                       |
+| Agg oversubscribed fat-tree | agg_os_fattree | LOSSLESS_INPUT_ECN                | speed (有过量订阅)                       |
+| Full circuit                | fc             | ECN                               | speed (点对点)                           |
+| Flat                        | flat           | ECN                               | speed (点对点)                           |
 
 ## 拓扑架构生成
 
@@ -182,13 +221,14 @@ SimAI-mixnet/
 
 **交换机结构**（三层 Clos）：
 
-| 层级 | 数量 | 公式 |
-|------|------|------|
-| ToR (接入层) | 8 | K²/2 |
-| Agg (汇聚层) | 8 | K²/2 |
-| Core (核心层) | 4 | K²/4 |
+| 层级          | 数量 | 公式  |
+| ------------- | ---- | ----- |
+| ToR (接入层)  | 8    | K²/2 |
+| Agg (汇聚层)  | 8    | K²/2 |
+| Core (核心层) | 4    | K²/4 |
 
 **连接方式**：
+
 - 每个 ToR 连接 K/2=2 台机器（下行）+ K/2=2 个 Agg 交换机（上行）
 - 每个 Agg 连接 K/2=2 个 ToR（下行）+ K/2=2 个 Core（上行）
 - Pod 数 = K = 4，每 Pod 含 K/2=2 个 ToR + K/2=2 个 Agg
@@ -200,7 +240,7 @@ SimAI-mixnet/
 ```
           [Core 0] [Core 1] [Core 2] [Core 3]
             / \      / \      / \      / \
-      ┌────┘   └──┐ ...                    
+      ┌────┘   └──┐ ...                  
    [Agg0] [Agg1] [Agg2] [Agg3] ... [Agg6] [Agg7]
     / \    / \    / \    / \          / \    / \
  [ToR0][ToR1][ToR2][ToR3]  ...   [ToR6][ToR7]
@@ -214,11 +254,11 @@ SimAI-mixnet/
 
 **参数**：Nhpr = os_ratio = 2（每 ToR 下挂主机数）
 
-| 层级 | 数量 | 公式 |
-|------|------|------|
-| ToR | 8 | K²/2 |
-| Agg | 8 | K × (K - Nhpr) |
-| Core | 4 | Nup/2 |
+| 层级 | 数量 | 公式            |
+| ---- | ---- | --------------- |
+| ToR  | 8    | K²/2           |
+| Agg  | 8    | K × (K - Nhpr) |
+| Core | 4    | Nup/2           |
 
 **过量订阅**：每 ToR 有 Nhpr=2 个下行端口连主机，(K-Nhpr)=2 个上行端口连 Agg。下行总带宽 = 上行总带宽，实际无过量订阅（os_ratio=2 时刚好平衡）。os_ratio 越大，下行端口越多，上行比例越低。
 
@@ -228,11 +268,11 @@ SimAI-mixnet/
 
 **参数**：Nhpr = K/2 = 2（固定），up_port = os_ratio = 2
 
-| 层级 | 数量 | 公式 |
-|------|------|------|
-| ToR | 8 | K²/2 |
-| Agg | 8 | K × up_port |
-| Core | 4 | Nup/2 |
+| 层级 | 数量 | 公式         |
+| ---- | ---- | ------------ |
+| ToR  | 8    | K²/2        |
+| Agg  | 8    | K × up_port |
+| Core | 4    | Nup/2        |
 
 **与 os_fattree 的区别**：Agg 层分配方式不同。agg_os_fattree 每 Pod 分配 Nup/K=2 个 Agg 交换机，更均匀地分配汇聚层资源。
 
@@ -280,16 +320,17 @@ region_num  = num_machines / region_size
 
 **双层网络**：
 
-| 层 | 类型 | 覆盖范围 | 链路速率 |
-|----|------|---------|---------|
-| OCS 光层 | 区域内直连电路 | 同区域机器对 | speed × alpha = 400 Gbps |
-| ECS 电层 | Fat-tree 骨干 | 全局（跨区域） | speed × (8 - alpha) = 400 Gbps |
+| 层       | 类型           | 覆盖范围       | 链路速率                        |
+| -------- | -------------- | -------------- | ------------------------------- |
+| OCS 光层 | 区域内直连电路 | 同区域机器对   | speed × alpha = 400 Gbps       |
+| ECS 电层 | Fat-tree 骨干  | 全局（跨区域） | speed × (8 - alpha) = 400 Gbps |
 
 - **OCS**：每台机器最多 alpha=4 条光电路连接同区域其他机器。连接矩阵 `conn[i][j]` 动态生成，仅区域内连接。
 - **ECS**：完整 Fat-tree（K=4），作为所有非 OCS 流量的回退路径。
 - 总带宽：OCS + ECS = 400 + 400 = 800 Gbps（与纯 Fat-tree 一致）。
 
 **路由决策**（entry.h）：
+
 - All-to-All 流量 + OCS 连接存在 → 走 OCS 光层
 - 其他流量（All-Reduce 等）→ 走 ECS Fat-tree
 - 区域正在重配置 → 延迟发送，等待重配完成
@@ -310,11 +351,18 @@ region_num  = num_machines / region_size
 
 ## AICB Workload 生成
 
-workload 为空时 `run.sh --gen-workload` 自动调用 AICB 生成。也可手动：
+run.sh 根据 `phase` 自动选择生成器：
+
+| phase            | 生成脚本                                    | model_size 示例 |
+| ---------------- | ------------------------------------------- | --------------- |
+| decode / prefill | `scripts/inference_workload_with_aiob.sh` | deepseek-671B   |
+| train            | `scripts/megatron_workload_with_aiob.sh`  | deepseek671     |
+
+workload 文件不存在或指定 `--gen-workload` 时自动生成。也可手动：
 
 ```bash
 cd SimAI/aicb
-# 推理 decode
+# 推理 (decode / prefill)
 bash scripts/inference_workload_with_aiob.sh \
   --model_size deepseek-671B --phase decode \
   --world_size 64 --tensor_model_parallel_size 8 \
@@ -322,11 +370,11 @@ bash scripts/inference_workload_with_aiob.sh \
   --seq_length 1024 --micro_batch 32 \
   --result_dir results/workload/
 
-# 训练 (需 conda myenv)
-python -m workload_generator.SimAI_training_workload_generator \
-  --frame DeepSeek --model_name DeepSeek-671B \
+# 训练
+bash scripts/megatron_workload_with_aiob.sh \
+  --model_size deepseek671 \
   --world_size 64 --tensor_model_parallel_size 2 \
   --pipeline_model_parallel 2 --expert_model_parallel_size 8 \
   --seq_length 4096 --micro_batch 1 --global_batch 32 \
-  --moe_enable --workload_only
+  --moe_enable
 ```

@@ -8,6 +8,7 @@
     "ecs_only": false
   },
   "simulation": {
-    "iterations": 1
+    "iterations": 1,
+    "rto_ms": 1
   }
 }

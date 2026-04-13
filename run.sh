@@ -8,7 +8,8 @@
 #   ./run.sh conf/topo/fattree.json conf/workload/deepseek-671b-decode.json --skip-build
 #   ./run.sh --build-only
 #   ./run.sh --test-all [workload.json]
-
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate myenv
 set -e
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -76,6 +77,110 @@ if ! command -v jq &>/dev/null; then
   exit 1
 fi
 
+# ========== Workload 生成函数 ==========
+gen_workload_inference() {
+  local wl_cfg="$1"
+  local MODEL_SIZE=$(jq -r '.model.model_size // ""' "$wl_cfg")
+  if [[ -z "$MODEL_SIZE" || "$MODEL_SIZE" == "null" ]]; then
+    echo "  Error: model.model_size required for inference workload generation" >&2
+    return 1
+  fi
+  local PHASE=$(jq -r '.model.phase' "$wl_cfg")
+  local SEQ_LENGTH=$(jq -r '.model.seq_length // 1024' "$wl_cfg")
+  local MICRO_BATCH=$(jq -r '.model.micro_batch // 1' "$wl_cfg")
+  local WORLD_SIZE=$(jq -r '.model.world_size // 64' "$wl_cfg")
+  local TP=$(jq -r '.model.tp_degree // 1' "$wl_cfg")
+  local PP=$(jq -r '.model.pp_degree // 1' "$wl_cfg")
+  local EP=$(jq -r '.model.ep_degree // 1' "$wl_cfg")
+  local OUTPUT
+  OUTPUT=$(cd "${ROOT}/SimAI/aicb" && bash scripts/inference_workload_with_aiob.sh \
+    --model_size "$MODEL_SIZE" \
+    --phase "$PHASE" \
+    --seq_length "$SEQ_LENGTH" \
+    --micro_batch "$MICRO_BATCH" \
+    --world_size "$WORLD_SIZE" \
+    --tensor_model_parallel_size "$TP" \
+    --pipeline_model_parallel "$PP" \
+    --expert_model_parallel_size "$EP" \
+    --result_dir "results/workload/" 2>&1)
+  echo "$OUTPUT" >&2
+  local GEN_FILE=$(echo "$OUTPUT" | grep "workload save in" | sed 's/.*workload save in : *//')
+  if [[ -n "$GEN_FILE" ]]; then
+    echo "${ROOT}/SimAI/aicb/${GEN_FILE}"
+  fi
+}
+
+gen_workload_train() {
+  local wl_cfg="$1"
+  # --- model 并行参数 ---
+  local WORLD_SIZE=$(jq -r '.model.world_size // 64' "$wl_cfg")
+  local TP=$(jq -r '.model.tp_degree // 1' "$wl_cfg")
+  local PP=$(jq -r '.model.pp_degree // 1' "$wl_cfg")
+  local EP=$(jq -r '.model.ep_degree // 1' "$wl_cfg")
+  local SEQ_LENGTH=$(jq -r '.model.seq_length // 4096' "$wl_cfg")
+  local MICRO_BATCH=$(jq -r '.model.micro_batch // 1' "$wl_cfg")
+  local GLOBAL_BATCH=$(jq -r '.model.global_batch // 32' "$wl_cfg")
+  # --- train 模型结构参数 (DeepSeek-671B 默认值) ---
+  local FRAME=$(jq -r '.train.frame // "DeepSeek"' "$wl_cfg")
+  local MODEL_NAME_T=$(jq -r '.train.model_name // "DeepSeek_671B"' "$wl_cfg")
+  local NUM_LAYERS=$(jq -r '.train.num_layers // 61' "$wl_cfg")
+  local HIDDEN_SIZE=$(jq -r '.train.hidden_size // 18432' "$wl_cfg")
+  local NUM_ATTN_HEADS=$(jq -r '.train.num_attention_heads // 128' "$wl_cfg")
+  local FFN_HIDDEN=$(jq -r '.train.ffn_hidden_size // 2048' "$wl_cfg")
+  local VOCAB_SIZE=$(jq -r '.train.vocab_size // 50257' "$wl_cfg")
+  local MAX_POS_EMB=$(jq -r '.train.max_position_embeddings // 4096' "$wl_cfg")
+  local NUM_EXPERTS=$(jq -r '.train.num_experts // 256' "$wl_cfg")
+  local N_SHARED_EXPERT=$(jq -r '.train.n_shared_expert // 1' "$wl_cfg")
+  local N_DENSE_LAYER=$(jq -r '.train.n_dense_layer // 3' "$wl_cfg")
+  local Q_LORA_RANK=$(jq -r '.train.q_lora_rank // 1536' "$wl_cfg")
+  local KV_LORA_RANK=$(jq -r '.train.kv_lora_rank // 512' "$wl_cfg")
+  local QK_NOPE_DIM=$(jq -r '.train.qk_nope_dim // 128' "$wl_cfg")
+  local QK_ROPE_DIM=$(jq -r '.train.qk_rope_dim // 64' "$wl_cfg")
+  local V_HEAD_DIM=$(jq -r '.train.v_head_dim // 128' "$wl_cfg")
+  local MOE_TOPK=$(jq -r '.train.moe_router_topk // null' "$wl_cfg")
+  local EPOCH_NUM=$(jq -r '.train.epoch_num // 1' "$wl_cfg")
+  # --- 布尔开关 ---
+  local MOE_ENABLE=$(jq -r '.train.moe_enable // true' "$wl_cfg")
+  local SP_ENABLE=$(jq -r '.train.enable_sequence_parallel // true' "$wl_cfg")
+  local SWIGLU=$(jq -r '.train.swiglu // false' "$wl_cfg")
+  local FLASH_ATTN=$(jq -r '.train.use_flash_attn // false' "$wl_cfg")
+  local RECOMPUTE=$(jq -r '.train.recompute_activations // false' "$wl_cfg")
+  local GROUPED_GEMM=$(jq -r '.train.moe_grouped_gemm // false' "$wl_cfg")
+
+  # 直接调用 python, 绕过 megatron_workload_with_aiob.sh (该脚本会覆盖 CLI 参数)
+  local CMD=(python -m workload_generator.SimAI_training_workload_generator)
+  CMD+=(--frame="$FRAME" --model_name="$MODEL_NAME_T")
+  CMD+=(--world_size="$WORLD_SIZE")
+  CMD+=(--tensor_model_parallel_size="$TP" --pipeline_model_parallel="$PP")
+  CMD+=(--expert_model_parallel_size="$EP")
+  CMD+=(--seq_length="$SEQ_LENGTH" --micro_batch="$MICRO_BATCH" --global_batch="$GLOBAL_BATCH")
+  CMD+=(--num_layers="$NUM_LAYERS" --hidden_size="$HIDDEN_SIZE")
+  CMD+=(--num_attention_heads="$NUM_ATTN_HEADS" --ffn_hidden_size="$FFN_HIDDEN")
+  CMD+=(--vocab_size="$VOCAB_SIZE" --max_position_embeddings="$MAX_POS_EMB")
+  CMD+=(--num_experts="$NUM_EXPERTS" --n_shared_expert="$N_SHARED_EXPERT" --n_dense_layer="$N_DENSE_LAYER")
+  CMD+=(--q_lora_rank="$Q_LORA_RANK" --kv_lora_rank="$KV_LORA_RANK")
+  CMD+=(--qk_nope_dim="$QK_NOPE_DIM" --qk_rope_dim="$QK_ROPE_DIM" --v_head_dim="$V_HEAD_DIM")
+  CMD+=(--epoch_num="$EPOCH_NUM")
+  CMD+=(--workload_only)
+  [[ "$MOE_ENABLE" == "true" ]] && CMD+=(--moe_enable)
+  [[ "$SP_ENABLE" == "true" ]] && CMD+=(--enable_sequence_parallel)
+  [[ "$SWIGLU" == "true" ]] && CMD+=(--swiglu)
+  [[ "$FLASH_ATTN" == "true" ]] && CMD+=(--use_flash_attn)
+  [[ "$RECOMPUTE" == "true" ]] && CMD+=(--recompute_activations)
+  [[ "$GROUPED_GEMM" == "true" ]] && CMD+=(--moe_grouped_gemm)
+  [[ "$MOE_TOPK" != "null" ]] && CMD+=(--moe_router_topk="$MOE_TOPK")
+
+  # 运行并捕获输出, 从 "workload save in :" 提取实际生成的文件路径
+  local OUTPUT
+  echo "  ${CMD[*]}" >&2
+  OUTPUT=$(cd "${ROOT}/SimAI/aicb" && "${CMD[@]}" 2>&1)
+  echo "$OUTPUT" >&2
+  local GEN_FILE=$(echo "$OUTPUT" | grep "workload save in" | sed 's/.*workload save in : *//')
+  if [[ -n "$GEN_FILE" ]]; then
+    echo "${ROOT}/SimAI/aicb/${GEN_FILE}"
+  fi
+}
+
 # ========== 读取两个 JSON 配置并运行仿真的函数 ==========
 run_config() {
   local topo_cfg="$1"
@@ -105,6 +210,7 @@ run_config() {
   local PHASE=$(jq -r '.model.phase // "decode"' "$wl_cfg")
   local SEQ_LENGTH=$(jq -r '.model.seq_length // 1024' "$wl_cfg")
   local MICRO_BATCH=$(jq -r '.model.micro_batch // 1' "$wl_cfg")
+  local GLOBAL_BATCH=$(jq -r '.model.global_batch // 32' "$wl_cfg")
 
   # --- 读取 topology (from topo config) ---
   local TOPO=$(jq -r '.topology.type // "fattree"' "$topo_cfg")
@@ -117,6 +223,7 @@ run_config() {
 
   # --- 读取 simulation (from topo config) ---
   local ITERATIONS=$(jq -r '.simulation.iterations // 1' "$topo_cfg")
+  local RTO_MS=$(jq -r '.simulation.rto_ms // 1' "$topo_cfg")
 
   # --- workload 路径自动推导 ---
   if [[ -z "$WORKLOAD" || "$WORKLOAD" == "null" ]]; then
@@ -126,24 +233,20 @@ run_config() {
 
   # --- workload 生成 (如需) ---
   if [[ ! -f "$WORKLOAD" ]] || $GEN_WORKLOAD; then
-    echo "  Generating workload..."
-    if [[ -z "$MODEL_SIZE" || "$MODEL_SIZE" == "null" ]]; then
-      echo "  Error: model.model_size required for workload generation"
-      return 1
+    echo "  Generating workload (phase=$PHASE)..."
+    local GEN_PATH
+    if [[ "$PHASE" == "train" ]]; then
+      GEN_PATH=$(gen_workload_train "$wl_cfg")
+    else
+      GEN_PATH=$(gen_workload_inference "$wl_cfg")
     fi
-    (
-      cd "${ROOT}/SimAI/aicb"
-      bash scripts/inference_workload_with_aiob.sh \
-        --model_size "$MODEL_SIZE" \
-        --phase "$PHASE" \
-        --seq_length "$SEQ_LENGTH" \
-        --micro_batch "$MICRO_BATCH" \
-        --world_size "$WORLD_SIZE" \
-        --tensor_model_parallel_size "$TP" \
-        --pipeline_model_parallel "$PP" \
-        --expert_model_parallel_size "$EP" \
-        --result_dir "results/workload/"
-    )
+    if [[ -n "$GEN_PATH" ]]; then
+      # 补 .txt 后缀 (推理生成器输出可能不带)
+      [[ "$GEN_PATH" != *.txt ]] && GEN_PATH="${GEN_PATH}.txt"
+      if [[ -f "$GEN_PATH" ]]; then
+        WORKLOAD="$GEN_PATH"
+      fi
+    fi
     if [[ ! -f "$WORKLOAD" ]]; then
       echo "  Error: workload generation did not produce: $WORKLOAD"
       echo "  Check SimAI/aicb/results/workload/ for generated files"
@@ -166,6 +269,7 @@ run_config() {
   CMD+=(--speed "$SPEED")
   CMD+=(--queuesize "$QUEUESIZE")
   CMD+=(--iterations "$ITERATIONS")
+  CMD+=(--rto "$RTO_MS")
 
   # 拓扑特有参数
   case "$TOPO" in
@@ -226,10 +330,10 @@ run_multiple() {
     echo ">>> [$TOPO_NAME] $cfg"
     if run_config "$cfg" "$wl_cfg"; then
       echo "<<< [$TOPO_NAME] OK"
-      ((PASS++))
+      PASS=$((PASS + 1))
     else
       echo "<<< [$TOPO_NAME] FAILED (exit $?)"
-      ((FAIL++))
+      FAIL=$((FAIL + 1))
     fi
     echo ""
   done

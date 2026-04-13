@@ -695,14 +695,14 @@ void Workload::iterate_distributed_inference() {
       int filled = bar_width * done_steps / total_steps;
       std::string bar(filled, '#');
       bar += std::string(bar_width - filled, '-');
-      printf("\r[%s] %3d%% pass %d/%d layer %d/%d  ",
+      fprintf(stderr, "\r[%s] %3d%% pass %d/%d layer %d/%d  ",
              bar.c_str(), pct, pass_counter+1, TOTAL_PASS, current_layer, total_layers_per_pass);
-      fflush(stdout);
+      fflush(stderr);
     }
     if (index >= SIZE) {
       index = 0;
       pass_counter++;
-      if (generator->id == 0) printf("\n");
+      if (generator->id == 0) fprintf(stderr, "\n");
     }
     generator->register_event(this, EventType::General, NULL, 1);
     return;
@@ -831,9 +831,9 @@ void Workload::iterate_hybrid_parallel_Transformer() {
       int filled = bar_width * done_steps / total_steps;
       std::string bar(filled, '#');
       bar += std::string(bar_width - filled, '-');
-      printf("\r[%s] %3d%% pass %d/%d fwd %d/%d  ",
+      fprintf(stderr, "\r[%s] %3d%% pass %d/%d fwd %d/%d  ",
              bar.c_str(), pct, pass_counter+1, TOTAL_PASS, index, SIZE);
-      fflush(stdout);
+      fflush(stderr);
     }
     if (index >= SIZE) {
       index--;
@@ -890,14 +890,14 @@ void Workload::iterate_hybrid_parallel_Transformer() {
       int filled = bar_width * done_steps / total_steps;
       std::string bar(filled, '#');
       bar += std::string(bar_width - filled, '-');
-      printf("\r[%s] %3d%% pass %d/%d bwd %d/%d  ",
+      fprintf(stderr, "\r[%s] %3d%% pass %d/%d bwd %d/%d  ",
              bar.c_str(), pct, pass_counter+1, TOTAL_PASS, bwd_done, SIZE);
-      fflush(stdout);
+      fflush(stderr);
     }
     if (index == -1) {
       index = 0;
       if (generator->id == 0) {
-        printf("\n");
+        fprintf(stderr, "\n");
         std::cout << "pass: " << pass_counter
                   << " finished at time: " << Sys::boostedTick() << std::endl;
       }
@@ -986,9 +986,9 @@ void Workload::iterate_hybrid_parallel_Transformer_fwd_in_bckwd() {
       int filled = bar_width * done_steps / total_steps;
       std::string bar(filled, '#');
       bar += std::string(bar_width - filled, '-');
-      printf("\r[%s] %3d%% pass %d/%d fwd %d/%d  ",
+      fprintf(stderr, "\r[%s] %3d%% pass %d/%d fwd %d/%d  ",
              bar.c_str(), pct, pass_counter+1, TOTAL_PASS, index, SIZE);
-      fflush(stdout);
+      fflush(stderr);
     }
     if (index >= SIZE) {
       index--;
@@ -1046,14 +1046,14 @@ void Workload::iterate_hybrid_parallel_Transformer_fwd_in_bckwd() {
       int filled = bar_width * done_steps / total_steps;
       std::string bar(filled, '#');
       bar += std::string(bar_width - filled, '-');
-      printf("\r[%s] %3d%% pass %d/%d bwd %d/%d  ",
+      fprintf(stderr, "\r[%s] %3d%% pass %d/%d bwd %d/%d  ",
              bar.c_str(), pct, pass_counter+1, TOTAL_PASS, bwd_done, SIZE);
-      fflush(stdout);
+      fflush(stderr);
     }
     if (index == -1) {
       index = 0;
       if (generator->id == 0) {
-        printf("\n");
+        fprintf(stderr, "\n");
         std::cout << "pass: " << pass_counter
                   << " finished at time: " << Sys::boostedTick() << std::endl;
       }

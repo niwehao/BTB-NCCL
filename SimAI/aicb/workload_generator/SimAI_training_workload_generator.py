@@ -75,7 +75,8 @@ def _get_aiob_compute_time(compute_cache, forward_or_backward, stage, dowarn=Tru
             return compute_time
     # just so it doesn't spam warning when trying to get per-layer comp time
     if dowarn:
-        print("[warn] can't match any stage", stage)
+        #print("[warn] can't match any stage", stage)
+        pass
     return 1
 
 

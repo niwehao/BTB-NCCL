@@ -56,7 +56,8 @@ def _get_aiob_compute_time(compute_cache, forward_or_backward, stage, dowarn=Tru
             return compute_time
 
     if dowarn:
-        print(f"[warn] can't match any stage with {stage}, using default_compute_time {default_compute_time}")
+        #print(f"[warn] can't match any stage with {stage}, using default_compute_time {default_compute_time}")
+        pass
     return default_compute_time
 
 class LayerInfo:

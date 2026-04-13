@@ -211,6 +211,7 @@ struct user_param {
   int iterations;      // number of forward+backward passes
   bool ecs_only;       // force all traffic through ECS (no OCS)
   int os_ratio;        // oversubscription ratio for os_fattree/agg_os_fattree (default: 2)
+  int rto_ms;          // TCP retransmission timeout in milliseconds (default: 1)
 
   user_param() {
     workload = "";
@@ -228,6 +229,7 @@ struct user_param {
     iterations = 1;
     ecs_only = false;
     os_ratio = 2;
+    rto_ms = 1;
   }
 };
 
@@ -248,6 +250,7 @@ static void print_usage() {
   cout << "  --iterations N          Number of passes (default: 1)" << endl;
   cout << "  --ecs_only              Force all traffic through ECS (no OCS, mixnet only)" << endl;
   cout << "  --os_ratio N            Oversubscription ratio (default: 2, os_fattree/agg_os_fattree only)" << endl;
+  cout << "  --rto N                 TCP retransmission timeout in ms (default: 1)" << endl;
 }
 
 static int parse_params(int argc, char* argv[], struct user_param* params) {
@@ -267,6 +270,7 @@ static int parse_params(int argc, char* argv[], struct user_param* params) {
     {"iterations",    required_argument, 0, 'i'},
     {"ecs_only",      no_argument,       0, 'E'},
     {"os_ratio",      required_argument, 0, 'O'},
+    {"rto",           required_argument, 0, 'R'},
     {"help",          no_argument,       0, 'h'},
     {0, 0, 0, 0}
   };
@@ -289,6 +293,7 @@ static int parse_params(int argc, char* argv[], struct user_param* params) {
       case 'i': params->iterations = stoi(optarg); break;
       case 'E': params->ecs_only = true; break;
       case 'O': params->os_ratio = stoi(optarg); break;
+      case 'R': params->rto_ms = stoi(optarg); break;
       case 'h': print_usage(); return 1;
       default:  print_usage(); return 1;
     }
@@ -382,8 +387,9 @@ int main(int argc, char *argv[]) {
   cout << "Workload: " << params.workload << endl;
   cout << "==========================" << endl;
 
-  // Set ECS-only mode in entry.h
+  // Set ECS-only mode and RTO in entry.h
   g_force_ecs_only = params.ecs_only;
+  g_rto_ms = params.rto_ms;
 
   // 1. Create htsim EventList
   EventList eventlist;
@@ -587,6 +593,24 @@ int main(int argc, char *argv[]) {
     cout << "Deferred flows (reconf): " << g_flow_count_deferred << endl;
   }
   uint64_t total_flows = g_flow_count_ocs + g_flow_count_ecs + g_flow_count_nvlink;
+
+  // Collect retransmission statistics from all TCP sources
+  uint64_t total_packets_sent = 0;
+  uint64_t total_retransmissions = 0;
+  for (auto it = g_tcp_scanner->_tcps.begin(); it != g_tcp_scanner->_tcps.end(); ++it) {
+    total_packets_sent += (*it)->_packets_sent;
+    total_retransmissions += (*it)->_drops;
+  }
+  double retx_rate = (total_packets_sent > 0) ? (100.0 * total_retransmissions / total_packets_sent) : 0.0;
+
+  cout << endl;
+  cout << "======== Retransmission Statistics ========" << endl;
+  cout << "RTO: " << params.rto_ms << " ms" << endl;
+  cout << "Total packets sent: " << total_packets_sent << endl;
+  cout << "Total retransmissions: " << total_retransmissions << endl;
+  cout << "Retransmission rate: " << retx_rate << "%" << endl;
+  cout << "TCP flows tracked: " << g_tcp_scanner->_tcps.size() << endl;
+  cout << "============================================" << endl;
   cout << "========================================" << endl;
 
   // Write stats.txt summary
@@ -659,6 +683,14 @@ int main(int argc, char *argv[]) {
         }
       }
     }
+
+    stats << endl;
+    stats << "======== Retransmission Statistics ========" << endl;
+    stats << "RTO: " << params.rto_ms << " ms" << endl;
+    stats << "Total packets sent: " << total_packets_sent << endl;
+    stats << "Total retransmissions: " << total_retransmissions << endl;
+    stats << "Retransmission rate: " << retx_rate << "%" << endl;
+    stats << "TCP flows tracked: " << g_tcp_scanner->_tcps.size() << endl;
 
     stats << endl;
     stats << "======== Timing ========" << endl;

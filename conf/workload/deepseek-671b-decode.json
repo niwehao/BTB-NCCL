@@ -11,6 +11,6 @@
     "phase": "decode",
     "seq_length": 1024,
     "micro_batch": 1,
-    "workload": "SimAI/aicb/results/workload/DeepSeek-671B-world_size64-tp8-pp2-ep4-bs32-seq1-decode.txt"
+    "workload": ""
   }
 }
