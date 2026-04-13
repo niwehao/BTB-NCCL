@@ -1,0 +1,173 @@
+# Makefile.htsim - Build SimAI with htsim OCS-ECS hybrid network backend
+# Usage: make -f Makefile.htsim [-j8]
+
+# ======== Directory paths ========
+ROOT_DIR := $(shell pwd)
+ASTRASIM_DIR := $(ROOT_DIR)/SimAI/astra-sim-alibabacloud
+HTSIM_DIR := $(ROOT_DIR)/mixnet-sim/mixnet-htsim/src/clos
+SYS_DIR := $(ASTRASIM_DIR)/astra-sim/system
+FRONTEND_DIR := $(ASTRASIM_DIR)/astra-sim/network_frontend/htsim
+BUILD_DIR := $(ROOT_DIR)/build_htsim
+
+# ======== Compiler settings ========
+CXX := g++
+CXXFLAGS := -std=c++17 -O2 -g -Wall -Wno-unused-variable -Wno-sign-compare -Wno-unused-but-set-variable
+
+# ======== Include paths ========
+WORKLOAD_DIR := $(ASTRASIM_DIR)/astra-sim/workload
+
+INCLUDES := \
+	-I$(ASTRASIM_DIR) \
+	-I$(SYS_DIR) \
+	-I$(SYS_DIR)/collective \
+	-I$(SYS_DIR)/topology \
+	-I$(SYS_DIR)/scheduling \
+	-I$(WORKLOAD_DIR) \
+	-I$(HTSIM_DIR) \
+	-I$(HTSIM_DIR)/datacenter \
+	-I/opt/homebrew/include
+
+# ======== astra-sim system source files ========
+ASTRASIM_SRCS := \
+	$(SYS_DIR)/AstraParamParse.cc \
+	$(SYS_DIR)/BaseStream.cc \
+	$(SYS_DIR)/BasicEventHandlerData.cc \
+	$(SYS_DIR)/CollectivePhase.cc \
+	$(SYS_DIR)/DMA_Request.cc \
+	$(SYS_DIR)/DataSet.cc \
+	$(SYS_DIR)/IntData.cc \
+	$(SYS_DIR)/LogGP.cc \
+	$(SYS_DIR)/MemBus.cc \
+	$(SYS_DIR)/MemMovRequest.cc \
+	$(SYS_DIR)/MockNcclChannel.cc \
+	$(SYS_DIR)/MockNcclGroup.cc \
+	$(SYS_DIR)/MockNcclLog.cc \
+	$(SYS_DIR)/MyPacket.cc \
+	$(SYS_DIR)/NetworkStat.cc \
+	$(SYS_DIR)/PacketBundle.cc \
+	$(SYS_DIR)/QueueLevelHandler.cc \
+	$(SYS_DIR)/QueueLevels.cc \
+	$(SYS_DIR)/RecvPacketEventHadndlerData.cc \
+	$(SYS_DIR)/RendezvousRecvData.cc \
+	$(SYS_DIR)/RendezvousSendData.cc \
+	$(SYS_DIR)/SendPacketEventHandlerData.cc \
+	$(SYS_DIR)/SharedBusStat.cc \
+	$(SYS_DIR)/SimRecvCaller.cc \
+	$(SYS_DIR)/SimSendCaller.cc \
+	$(SYS_DIR)/StatData.cc \
+	$(SYS_DIR)/StreamBaseline.cc \
+	$(SYS_DIR)/StreamStat.cc \
+	$(SYS_DIR)/Sys.cc \
+	$(SYS_DIR)/Usage.cc \
+	$(SYS_DIR)/UsageTracker.cc \
+	$(SYS_DIR)/calbusbw.cc \
+	$(SYS_DIR)/collective/Algorithm.cc \
+	$(SYS_DIR)/collective/AllToAll.cc \
+	$(SYS_DIR)/collective/DoubleBinaryTreeAllReduce.cc \
+	$(SYS_DIR)/collective/HalvingDoubling.cc \
+	$(SYS_DIR)/collective/NcclTreeFlowModel.cc \
+	$(SYS_DIR)/collective/Ring.cc \
+	$(SYS_DIR)/scheduling/OfflineGreedy.cc \
+	$(SYS_DIR)/topology/BasicLogicalTopology.cc \
+	$(SYS_DIR)/topology/BinaryTree.cc \
+	$(SYS_DIR)/topology/ComplexLogicalTopology.cc \
+	$(SYS_DIR)/topology/DoubleBinaryTreeTopology.cc \
+	$(SYS_DIR)/topology/GeneralComplexTopology.cc \
+	$(SYS_DIR)/topology/LocalRingGlobalBinaryTree.cc \
+	$(SYS_DIR)/topology/LocalRingNodeA2AGlobalDBT.cc \
+	$(SYS_DIR)/topology/LogicalTopology.cc \
+	$(SYS_DIR)/topology/Node.cc \
+	$(SYS_DIR)/topology/RingTopology.cc \
+	$(SYS_DIR)/topology/Torus3D.cc \
+	$(WORKLOAD_DIR)/Workload.cc \
+	$(WORKLOAD_DIR)/CSVWriter.cc \
+	$(WORKLOAD_DIR)/Layer.cc
+
+# ======== htsim source files (core library) ========
+HTSIM_SRCS := \
+	$(HTSIM_DIR)/eventlist.cpp \
+	$(HTSIM_DIR)/tcppacket.cpp \
+	$(HTSIM_DIR)/pipe.cpp \
+	$(HTSIM_DIR)/queue.cpp \
+	$(HTSIM_DIR)/queue_lossless.cpp \
+	$(HTSIM_DIR)/queue_lossless_input.cpp \
+	$(HTSIM_DIR)/queue_lossless_output.cpp \
+	$(HTSIM_DIR)/ecnqueue.cpp \
+	$(HTSIM_DIR)/tcp.cpp \
+	$(HTSIM_DIR)/dctcp.cpp \
+	$(HTSIM_DIR)/mtcp.cpp \
+	$(HTSIM_DIR)/loggers.cpp \
+	$(HTSIM_DIR)/logfile.cpp \
+	$(HTSIM_DIR)/clock.cpp \
+	$(HTSIM_DIR)/config.cpp \
+	$(HTSIM_DIR)/network.cpp \
+	$(HTSIM_DIR)/qcn.cpp \
+	$(HTSIM_DIR)/exoqueue.cpp \
+	$(HTSIM_DIR)/randomqueue.cpp \
+	$(HTSIM_DIR)/cbr.cpp \
+	$(HTSIM_DIR)/cbrpacket.cpp \
+	$(HTSIM_DIR)/sent_packets.cpp \
+	$(HTSIM_DIR)/ndp.cpp \
+	$(HTSIM_DIR)/ndppacket.cpp \
+	$(HTSIM_DIR)/eth_pause_packet.cpp \
+	$(HTSIM_DIR)/compositequeue.cpp \
+	$(HTSIM_DIR)/prioqueue.cpp \
+	$(HTSIM_DIR)/cpqueue.cpp \
+	$(HTSIM_DIR)/compositeprioqueue.cpp \
+	$(HTSIM_DIR)/switch.cpp \
+	$(HTSIM_DIR)/fairpullqueue.cpp \
+	$(HTSIM_DIR)/route.cpp \
+	$(HTSIM_DIR)/dyn_net_sch.cpp \
+	$(HTSIM_DIR)/mixnet_topomanager.cpp
+
+# ======== htsim datacenter topology files ========
+HTSIM_DC_SRCS := \
+	$(HTSIM_DIR)/datacenter/fat_tree_topology.cpp \
+	$(HTSIM_DIR)/datacenter/mixnet.cpp \
+	$(HTSIM_DIR)/datacenter/firstfit.cpp \
+	$(HTSIM_DIR)/datacenter/connection_matrix.cpp
+
+# ======== Frontend (new htsim backend) ========
+FRONTEND_SRCS := \
+	$(FRONTEND_DIR)/AstraSimNetwork.cc
+
+# ======== All sources ========
+ALL_SRCS := $(ASTRASIM_SRCS) $(HTSIM_SRCS) $(HTSIM_DC_SRCS) $(FRONTEND_SRCS)
+
+# ======== Object files (in build dir, preserving relative paths) ========
+ALL_OBJS := $(patsubst $(ROOT_DIR)/%,$(BUILD_DIR)/%.o,$(ALL_SRCS))
+
+# ======== Target ========
+TARGET := $(ROOT_DIR)/simai_htsim
+
+all: $(TARGET)
+
+$(TARGET): $(ALL_OBJS)
+	@echo "Linking $@..."
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread
+
+# Compile .cc files
+$(BUILD_DIR)/%.cc.o: $(ROOT_DIR)/%.cc
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Compile .cpp files
+$(BUILD_DIR)/%.cpp.o: $(ROOT_DIR)/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c -o $@ $<
+
+clean:
+	rm -rf $(BUILD_DIR) $(TARGET)
+
+# Print sources for debugging
+print-srcs:
+	@echo "=== astra-sim sources ==="
+	@echo $(ASTRASIM_SRCS) | tr ' ' '\n'
+	@echo "=== htsim sources ==="
+	@echo $(HTSIM_SRCS) | tr ' ' '\n'
+	@echo "=== htsim datacenter sources ==="
+	@echo $(HTSIM_DC_SRCS) | tr ' ' '\n'
+	@echo "=== frontend sources ==="
+	@echo $(FRONTEND_SRCS)
+
+.PHONY: all clean print-srcs

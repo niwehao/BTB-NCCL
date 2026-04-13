@@ -1,0 +1,84 @@
+namespace FlatBufTaskGraph;
+
+enum SimTaskType: short {
+  TASK_FORWARD = 0,
+  TASK_BACKWARD = 1,
+  TASK_COMM = 2,
+  TASK_UPDATE = 3,
+  TASK_BARRIER = 4,
+  TASK_NOMINAL_COMM = 5,
+  TASK_P2P = 6,
+  TASK_SUB_ALLREDUCE = 7,
+  TASK_DP_ALLREDUCE = 8,
+  TASK_TP_ALLREDUCE = 9,
+  TASK_ALLREDUCE = 10,
+  TASK_REDUCESCATTER = 11,
+  TASK_ALLGATHER = 12,
+  TASK_ALLTOALL = 13
+}
+
+enum DeviceType: short {
+  DEVICE_COMP_GPU = 0,
+  DEVICE_COMP_CPU = 1,
+  DEVICE_MEM_SYSTEM = 2,
+  DEVICE_MEM_Z_COPY = 3,
+  DEVICE_MEM_GPU_FB = 4,
+  DEVICE_COMM_MEMBUS_COMM = 5,
+  DEVICE_COMM_UPI_IN_COMM = 6,
+  DEVICE_COMM_UPI_OUT_COMM = 7,
+  DEVICE_COMM_NIC_IN_COMM = 8,
+  DEVICE_COMM_NIC_OUT_COMM = 9,
+  DEVICE_COMM_PCI_TO_HOST_COMM = 10,
+  DEVICE_COMM_PCI_TO_DEV_COMM = 11,
+  DEVICE_COMM_NVLINK_COMM = 12,
+  DEVICE_COMM_NW_COMM = 13,
+  DEVICE_COMM_NW_NOMINAL = 14,
+}
+
+table Task {
+  type: SimTaskType;
+  taskid: ulong;
+  deviceid: ulong = 0;
+  runtime: float = 0;
+  xfersize: ulong = 0;
+  counter: int;
+  nexttasks: [ulong];
+  from_node_ids: [ulong];
+  to_node_ids: [ulong]; 
+  name:string;
+  info:string;
+  micro_batch_id:int;
+  layer_id:int;
+  target_micro_batch_id:int;
+  target_layer_id:int;
+}
+
+table Device {
+  type: DeviceType;
+  deviceid: ulong;
+  nodeid: ulong = 0;
+  deviceproperty: ulong = 0;
+  bandwidth: ulong = 0;
+}
+
+table Operator {
+  opid: ulong;
+  type: ulong;
+  name: string;
+}
+
+table TaskGraph {
+  ngpupernode: uint;
+  nnode: uint;
+  intergpubw: float;
+  drambw: float;
+  netbw: float;
+  ops: [Operator];
+  tasks: [Task];
+  devices: [Device];
+  dp_degree: uint;
+  tp_degree: uint;
+  pp_degree: uint;
+  ep_degree: uint;
+}
+

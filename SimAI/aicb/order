@@ -1,0 +1,9 @@
+# 示例：模拟 8 卡环境，使用专家并行(EP=8)，Sequence Length 2048
+sh ./scripts/inference_workload_with_aiob.sh \
+  -m mixtral-8x7B \
+  -p decode \
+  -s 2048 \
+  -b 32 \
+  -w 8 \
+  -t 1 \
+  -e 8

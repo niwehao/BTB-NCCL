@@ -1,0 +1,61 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+*.mat
+*.dat
+
+htsim_tcp_*
+src/clos/datacenter/htsim_tcp_*
+
+# ccls
+.ccls-cache/
+
+# gdb
+.gdb_history
+
+# taskgraph
+test/*.fbuf
+
+# log
+src/clos/datacenter/logs/*
+.DS_Store
+
+# experiment log
+mixnet_scripts/*
+!mixnet_scripts/compile.sh
+!mixnet_scripts/onestage_mixtral_8x22B_fattree.sh
+!mixnet_scripts/onestage_mixtral_8x22B_mixnet.sh
+!mixnet_scripts/mixtral_8x22B_fattree.sh
+!mixnet_scripts/mixtral_8x22B_mixnet.sh
+
+.vscode/*

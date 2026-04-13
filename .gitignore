@@ -1,0 +1,35 @@
+# Build artifacts
+build_htsim/
+simai_htsim
+*.o
+*.a
+*.so
+*.dylib
+htsim_tcp_*
+
+# Run logs and outputs
+log/
+SimAI_htsim.log
+fct_output*.txt
+ncclFlowModel_*.csv
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude Code
+.claude/
