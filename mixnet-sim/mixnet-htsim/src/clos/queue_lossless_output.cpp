@@ -78,7 +78,7 @@ LosslessOutputQueue::receivePacket(Packet& pkt,VirtualQueue* prev)
     _queuesize += pkt.size();
 
     if (_queuesize > _maxsize){
-	cout << " Queue " << _name << " LOSSLESS not working! I should have dropped this packet" << endl;
+	//cout << " Queue " << _name << " LOSSLESS not working! I should have dropped this packet" << endl;
     }
 
     if (_logger) 

@@ -6,7 +6,7 @@
 #include "queue_lossless_input.h"
 
 void Switch::sendPause(LosslessQueue* problem, unsigned int wait){
-    cout << "Switch " << _name << " link " << problem->_name << " pause " << wait << endl;
+    //cout << "Switch " << _name << " link " << problem->_name << " pause " << wait << endl;
 
     for (list<Queue*>::iterator it=_ports.begin(); it != _ports.end(); ++it){
 	LosslessQueue* q = (LosslessQueue*)*it;
@@ -14,7 +14,7 @@ void Switch::sendPause(LosslessQueue* problem, unsigned int wait){
 	if (q==problem)
 	    continue;
 
-	cout << "Informing " << q->_name << endl;
+	//cout << "Informing " << q->_name << endl;
 	EthPausePacket* pkt = EthPausePacket::newpkt(wait);
 	q->getRemoteEndpoint()->receivePacket(*pkt);
     }

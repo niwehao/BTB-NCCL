@@ -84,7 +84,7 @@ LosslessQueue::receivePacket(Packet& pkt)
     //cout << timeAsMs(eventlist().now()) << " queue " << _name << " switch (" << _switch->_name << ") "<< " recv when paused pkt " << pkt.type() << " sz " << _queuesize << endl;	
 
     if (_queuesize > _maxsize){
-	cout << " Queue " << _name << " switch (" << _switch->_name << ") "<< " LOSSLESS not working! I should have dropped this packet" << endl;
+	//cout << " Queue " << _name << " switch (" << _switch->_name << ") "<< " LOSSLESS not working! I should have dropped this packet" << endl;
     }
 
     if (_logger) 

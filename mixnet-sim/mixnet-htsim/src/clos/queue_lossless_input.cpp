@@ -6,12 +6,12 @@
 #include "switch.h"
 
 LosslessInputQueue::LosslessInputQueue(EventList& eventlist)
-    : Queue(0,Packet::data_packet_size()*20,eventlist,NULL),
+    : Queue(0,Packet::data_packet_size()*100,eventlist,NULL),
       VirtualQueue(),
       _state_recv(READY)
 {
-    _high_threshold = Packet::data_packet_size()*15;
-    _low_threshold = Packet::data_packet_size()*12;
+    _high_threshold = Packet::data_packet_size()*50;
+    _low_threshold = Packet::data_packet_size()*30;
 
     assert(_high_threshold>0);
     assert(_high_threshold > _low_threshold);
@@ -19,12 +19,12 @@ LosslessInputQueue::LosslessInputQueue(EventList& eventlist)
 }
 
 LosslessInputQueue::LosslessInputQueue(EventList& eventlist,Queue* peer)
-    : Queue(0,Packet::data_packet_size()*20,eventlist,NULL),
+    : Queue(0,Packet::data_packet_size()*100,eventlist,NULL),
       VirtualQueue(),
       _state_recv(READY)
 {
-    _high_threshold = Packet::data_packet_size()*15;
-    _low_threshold = Packet::data_packet_size()*12;
+    _high_threshold = Packet::data_packet_size()*50;
+    _low_threshold = Packet::data_packet_size()*30;
 
     assert(_high_threshold>0);
     assert(_high_threshold > _low_threshold);
@@ -53,7 +53,7 @@ LosslessInputQueue::receivePacket(Packet& pkt)
     //cout << timeAsMs(eventlist().now()) << " queue " << _name << " switch (" << _switch->_name << ") "<< " recv when paused pkt " << pkt.type() << " sz " << _queuesize << endl;	
 
     if (_queuesize > _maxsize){
-	cout << " Queue " << _name << " LOSSLESS not working! I should have dropped this packet" << endl;
+	//cout << " Queue " << _name << " LOSSLESS not working! I should have dropped this packet" << endl;
     }
 
     //tell the output queue we're here!
@@ -71,7 +71,7 @@ void LosslessInputQueue::completedService(Packet& pkt){
 }
 
 void LosslessInputQueue::sendPause(unsigned int wait){
-    cout << "Ingress link " << getRemoteEndpoint()->_name << " PAUSE " << wait << endl;
+    //cout << "Ingress link " << getRemoteEndpoint()->_name << " PAUSE " << wait << endl;
     //cout << "Informing " << getRemoteEndpoint()->_name << endl;
     EthPausePacket* pkt = EthPausePacket::newpkt(wait);
     getRemoteEndpoint()->receivePacket(*pkt);

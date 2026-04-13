@@ -86,6 +86,13 @@ TopoType g_topo_type = TOPO_MIXNET;
 int g_gpus_per_server = 8;
 bool g_force_ecs_only = false;  // When true, all cross-machine traffic uses ECS
 int g_rto_ms = 1;  // TCP retransmission timeout in ms
+int g_total_gpus = 0;  // Total GPU count, for FCT sampling
+
+// Global retransmission counters (accumulated as flows finish, not at end)
+uint64_t g_total_packets_sent = 0;
+uint64_t g_total_retransmissions = 0;
+uint64_t g_total_tcp_flows = 0;       // finished TCP flows
+uint64_t g_total_tcp_flows_created = 0; // total TCP flows created
 
 // FCT output stream for tcp.cpp (required by TcpSrc::receivePacket at flow completion)
 std::ofstream g_fct_output;
@@ -547,6 +554,7 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
   }
 
   // ---- Create htsim TCP flow ----
+  g_total_tcp_flows_created++;
   HtsimFlowContext* ctx = new HtsimFlowContext{src, dst, maxPacketCount, request->flowTag};
 
   DCTCPSrc* flowSrc = new DCTCPSrc(NULL, NULL, &g_fct_output,

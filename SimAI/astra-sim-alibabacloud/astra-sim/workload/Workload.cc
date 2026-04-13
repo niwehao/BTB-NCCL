@@ -8,7 +8,29 @@ LICENSE file in the root directory of this source tree.
 #include "Layer.hh"
 #include "astra-sim/system/MockNcclLog.h"
 
+// Global flow counters (defined in entry.h)
+extern uint64_t g_total_tcp_flows;
+extern uint64_t g_total_tcp_flows_created;
+
 namespace AstraSim {
+
+// Print progress bar: layer progress on bar, flow stats appended
+static void print_global_progress(const char* phase, int pass, int total_pass,
+                                  int layer, int total_layers) {
+  // Bar based on node 0's layer progress (what the user cares about)
+  int total_steps = total_pass * total_layers;
+  int done_steps = (pass - 1) * total_layers + layer;
+  int pct = (total_steps > 0) ? (int)(100.0 * done_steps / total_steps) : 0;
+  int bar_width = 40;
+  int filled = bar_width * pct / 100;
+  std::string bar(filled, '#');
+  bar += std::string(bar_width - filled, '-');
+  fprintf(stderr, "\r[%s] %3d%% pass %d/%d %s %d/%d  flows: %lu/%lu  ",
+         bar.c_str(), pct, pass, total_pass, phase, layer, total_layers,
+         (unsigned long)g_total_tcp_flows, (unsigned long)g_total_tcp_flows_created);
+  fflush(stderr);
+}
+
 Workload::~Workload() {
   if (end_to_end != nullptr) {
     delete end_to_end;
@@ -686,18 +708,7 @@ void Workload::iterate_distributed_inference() {
     delay_loaded = false;
     collective_issued = false;
     if (generator->id == 0) {
-      int total_layers_per_pass = SIZE;
-      int current_layer = index;
-      int total_steps = TOTAL_PASS * total_layers_per_pass;
-      int done_steps = pass_counter * total_layers_per_pass + current_layer;
-      int pct = (int)(100.0 * done_steps / total_steps);
-      int bar_width = 40;
-      int filled = bar_width * done_steps / total_steps;
-      std::string bar(filled, '#');
-      bar += std::string(bar_width - filled, '-');
-      fprintf(stderr, "\r[%s] %3d%% pass %d/%d layer %d/%d  ",
-             bar.c_str(), pct, pass_counter+1, TOTAL_PASS, current_layer, total_layers_per_pass);
-      fflush(stderr);
+      print_global_progress("fwd", pass_counter+1, TOTAL_PASS, index, SIZE);
     }
     if (index >= SIZE) {
       index = 0;
@@ -822,18 +833,7 @@ void Workload::iterate_hybrid_parallel_Transformer() {
     delay_loaded = false;
     collective_issued = false;
     if (generator->id == 0) {
-      // Progress: forward pass counts as first half, backward as second half
-      int layers_per_pass = SIZE * 2;  // fwd + bwd
-      int total_steps = TOTAL_PASS * layers_per_pass;
-      int done_steps = pass_counter * layers_per_pass + index;
-      int pct = (int)(100.0 * done_steps / total_steps);
-      int bar_width = 40;
-      int filled = bar_width * done_steps / total_steps;
-      std::string bar(filled, '#');
-      bar += std::string(bar_width - filled, '-');
-      fprintf(stderr, "\r[%s] %3d%% pass %d/%d fwd %d/%d  ",
-             bar.c_str(), pct, pass_counter+1, TOTAL_PASS, index, SIZE);
-      fflush(stderr);
+      print_global_progress("fwd", pass_counter+1, TOTAL_PASS, index, SIZE);
     }
     if (index >= SIZE) {
       index--;
@@ -881,18 +881,8 @@ void Workload::iterate_hybrid_parallel_Transformer() {
       index--;
     }
     if (generator->id == 0) {
-      int layers_per_pass = SIZE * 2;
-      int total_steps = TOTAL_PASS * layers_per_pass;
       int bwd_done = SIZE - 1 - index;
-      int done_steps = pass_counter * layers_per_pass + SIZE + bwd_done;
-      int pct = (int)(100.0 * done_steps / total_steps);
-      int bar_width = 40;
-      int filled = bar_width * done_steps / total_steps;
-      std::string bar(filled, '#');
-      bar += std::string(bar_width - filled, '-');
-      fprintf(stderr, "\r[%s] %3d%% pass %d/%d bwd %d/%d  ",
-             bar.c_str(), pct, pass_counter+1, TOTAL_PASS, bwd_done, SIZE);
-      fflush(stderr);
+      print_global_progress("bwd", pass_counter+1, TOTAL_PASS, bwd_done, SIZE);
     }
     if (index == -1) {
       index = 0;
@@ -978,17 +968,7 @@ void Workload::iterate_hybrid_parallel_Transformer_fwd_in_bckwd() {
     delay_loaded = false;
     collective_issued = false;
     if (generator->id == 0) {
-      int layers_per_pass = SIZE * 2;
-      int total_steps = TOTAL_PASS * layers_per_pass;
-      int done_steps = pass_counter * layers_per_pass + index;
-      int pct = (int)(100.0 * done_steps / total_steps);
-      int bar_width = 40;
-      int filled = bar_width * done_steps / total_steps;
-      std::string bar(filled, '#');
-      bar += std::string(bar_width - filled, '-');
-      fprintf(stderr, "\r[%s] %3d%% pass %d/%d fwd %d/%d  ",
-             bar.c_str(), pct, pass_counter+1, TOTAL_PASS, index, SIZE);
-      fflush(stderr);
+      print_global_progress("fwd", pass_counter+1, TOTAL_PASS, index, SIZE);
     }
     if (index >= SIZE) {
       index--;
@@ -1037,18 +1017,8 @@ void Workload::iterate_hybrid_parallel_Transformer_fwd_in_bckwd() {
       index--;
     }
     if (generator->id == 0) {
-      int layers_per_pass = SIZE * 2;
-      int total_steps = TOTAL_PASS * layers_per_pass;
       int bwd_done = SIZE - 1 - index;
-      int done_steps = pass_counter * layers_per_pass + SIZE + bwd_done;
-      int pct = (int)(100.0 * done_steps / total_steps);
-      int bar_width = 40;
-      int filled = bar_width * done_steps / total_steps;
-      std::string bar(filled, '#');
-      bar += std::string(bar_width - filled, '-');
-      fprintf(stderr, "\r[%s] %3d%% pass %d/%d bwd %d/%d  ",
-             bar.c_str(), pct, pass_counter+1, TOTAL_PASS, bwd_done, SIZE);
-      fflush(stderr);
+      print_global_progress("bwd", pass_counter+1, TOTAL_PASS, bwd_done, SIZE);
     }
     if (index == -1) {
       index = 0;

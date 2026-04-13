@@ -6,6 +6,12 @@
 #include <iostream>
 #include <fstream>
 
+// Global counters (defined in entry.h)
+extern uint64_t g_total_packets_sent;
+extern uint64_t g_total_retransmissions;
+extern uint64_t g_total_tcp_flows;
+extern int g_total_gpus;
+
 #define KILL_THRESHOLD 5
 ////////////////////////////////////////////////////////////////
 //  TCP SOURCE
@@ -281,11 +287,19 @@ void TcpSrc::receivePacket(Packet &pkt)
 	{
 		_last_acked =
 				_finished = true;
-		// original:
-		// cout << "Flow " << nodename() << " finished at " << timeAsMs(eventlist().now()) << endl;
 
-		// FCT output for processing: (src dst bytes fct_ms timestarted_ms)
-		*(fstream_out) << "FCT " << get_flow_src() << " " << get_flow_dst() << " " << get_flowsize() << " " << timeAsMs(eventlist().now() - get_start_time()) << " " << timeAsMs(get_start_time()) << " " << (double)get_flowsize() / timeAsSec(eventlist().now() - get_start_time()) * 8 / 1000000000UL << endl;
+		// Accumulate retransmission stats before flow is erased
+		g_total_packets_sent += _packets_sent;
+		g_total_retransmissions += _drops;
+		g_total_tcp_flows++;
+
+		// FCT output: sample every N/32 GPUs by src to keep trace small
+		{
+			int step = (g_total_gpus > 32) ? (g_total_gpus / 32) : 1;
+			if (get_flow_src() % step == 0) {
+				*(fstream_out) << "FCT " << get_flow_src() << " " << get_flow_dst() << " " << get_flowsize() << " " << timeAsMs(eventlist().now() - get_start_time()) << " " << timeAsMs(get_start_time()) << " " << (double)get_flowsize() / timeAsSec(eventlist().now() - get_start_time()) * 8 / 1000000000UL << endl;
+			}
+		}
 		if (application_callback != nullptr)
 		{
 			application_callback(application_callback_data);

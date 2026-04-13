@@ -387,9 +387,10 @@ int main(int argc, char *argv[]) {
   cout << "Workload: " << params.workload << endl;
   cout << "==========================" << endl;
 
-  // Set ECS-only mode and RTO in entry.h
+  // Set ECS-only mode, RTO, and GPU count in entry.h
   g_force_ecs_only = params.ecs_only;
   g_rto_ms = params.rto_ms;
+  g_total_gpus = gpu_num;
 
   // 1. Create htsim EventList
   EventList eventlist;
@@ -573,10 +574,22 @@ int main(int argc, char *argv[]) {
   while (!g_simulation_done && eventlist.doNextEvent()) {
     event_count++;
     if (event_count % 10000000 == 0) {
-      cout << "[htsim] Events processed: " << event_count
-           << " Time: " << timeAsMs(eventlist.now()) << " ms" << endl;
+      // Show network drain progress on stderr
+      if (g_total_tcp_flows_created > 0) {
+        int pct = (int)(100.0 * g_total_tcp_flows / g_total_tcp_flows_created);
+        int bar_width = 40;
+        int filled = bar_width * pct / 100;
+        string bar(filled, '#');
+        bar += string(bar_width - filled, '-');
+        fprintf(stderr, "\r[%s] %3d%% flows: %lu/%lu  time: %.1f ms  events: %luM  ",
+               bar.c_str(), pct,
+               (unsigned long)g_total_tcp_flows, (unsigned long)g_total_tcp_flows_created,
+               timeAsMs(eventlist.now()), (unsigned long)(event_count / 1000000));
+        fflush(stderr);
+      }
     }
   }
+  fprintf(stderr, "\n");
   cout << "Simulation complete. Total events: " << event_count << endl;
   cout << "Final time: " << timeAsMs(eventlist.now()) << " ms ("
        << timeAsSec(eventlist.now()) << " s)" << endl;
@@ -594,22 +607,21 @@ int main(int argc, char *argv[]) {
   }
   uint64_t total_flows = g_flow_count_ocs + g_flow_count_ecs + g_flow_count_nvlink;
 
-  // Collect retransmission statistics from all TCP sources
-  uint64_t total_packets_sent = 0;
-  uint64_t total_retransmissions = 0;
+  // Also count any flows still in the scanner (not yet finished)
   for (auto it = g_tcp_scanner->_tcps.begin(); it != g_tcp_scanner->_tcps.end(); ++it) {
-    total_packets_sent += (*it)->_packets_sent;
-    total_retransmissions += (*it)->_drops;
+    g_total_packets_sent += (*it)->_packets_sent;
+    g_total_retransmissions += (*it)->_drops;
+    g_total_tcp_flows++;
   }
-  double retx_rate = (total_packets_sent > 0) ? (100.0 * total_retransmissions / total_packets_sent) : 0.0;
+  double retx_rate = (g_total_packets_sent > 0) ? (100.0 * g_total_retransmissions / g_total_packets_sent) : 0.0;
 
   cout << endl;
   cout << "======== Retransmission Statistics ========" << endl;
   cout << "RTO: " << params.rto_ms << " ms" << endl;
-  cout << "Total packets sent: " << total_packets_sent << endl;
-  cout << "Total retransmissions: " << total_retransmissions << endl;
+  cout << "Total packets sent: " << g_total_packets_sent << endl;
+  cout << "Total retransmissions: " << g_total_retransmissions << endl;
   cout << "Retransmission rate: " << retx_rate << "%" << endl;
-  cout << "TCP flows tracked: " << g_tcp_scanner->_tcps.size() << endl;
+  cout << "TCP flows tracked: " << g_total_tcp_flows << endl;
   cout << "============================================" << endl;
   cout << "========================================" << endl;
 
@@ -687,10 +699,10 @@ int main(int argc, char *argv[]) {
     stats << endl;
     stats << "======== Retransmission Statistics ========" << endl;
     stats << "RTO: " << params.rto_ms << " ms" << endl;
-    stats << "Total packets sent: " << total_packets_sent << endl;
-    stats << "Total retransmissions: " << total_retransmissions << endl;
+    stats << "Total packets sent: " << g_total_packets_sent << endl;
+    stats << "Total retransmissions: " << g_total_retransmissions << endl;
     stats << "Retransmission rate: " << retx_rate << "%" << endl;
-    stats << "TCP flows tracked: " << g_tcp_scanner->_tcps.size() << endl;
+    stats << "TCP flows tracked: " << g_total_tcp_flows << endl;
 
     stats << endl;
     stats << "======== Timing ========" << endl;
