@@ -131,10 +131,12 @@ void RegionalTopoManager::start_reconf()
 {
   // Compute the conn matrix based on traffic matrix at the beginning
   non_empty_queues = 0;
-  set_regional_tcp_pause();
-  // In multi-collective mode (SimAI), drain wait can deadlock because new flows
-  // keep arriving. Force immediate reconfiguration — queued packets will be
-  // handled by the new bandwidth assignments.
+  if (!proactive_mode) {
+    // Normal mode: pause existing TCP flows during reconfig
+    set_regional_tcp_pause();
+  }
+  // In proactive mode, skip TCP pause — existing flows continue on old bandwidth,
+  // new conn matrix takes effect for new flows after finish_reconf()
   _do_reconf();
 }
 
@@ -346,8 +348,9 @@ bool RegionalTopoManager::is_in_region(TcpSrc* tcpsrc) const {
     return false;
   }
   // Finally check if both source and destination are in this region
-  return tcpsrc->_flow_src >= 8*start_node && tcpsrc->_flow_src < 8*end_node && 
-         tcpsrc->_flow_dst >= 8*start_node && tcpsrc->_flow_dst < 8*end_node;
+  int gpn = topo->gpus_per_node;
+  return tcpsrc->_flow_src >= gpn*start_node && tcpsrc->_flow_src < gpn*end_node &&
+         tcpsrc->_flow_dst >= gpn*start_node && tcpsrc->_flow_dst < gpn*end_node;
 }
 
 std::vector<std::vector<int>> RegionalTopoManager::regional_topo_reconfig() {

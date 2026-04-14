@@ -41,7 +41,7 @@ public:
   int _no_of_nodes;
   queue_type qt;
 
-  Mixnet(int no_of_gpus, mem_b queuesize, Logfile *lg, EventList& ev, FirstFit *fit, queue_type q, simtime_picosec refonc_delay, Topology* elec_topology,int alpha_,int dp_degree_, int tp_degree_, int pp_degree_, int ep_degree_);
+  Mixnet(int no_of_gpus, mem_b queuesize, Logfile *lg, EventList& ev, FirstFit *fit, queue_type q, simtime_picosec refonc_delay, Topology* elec_topology,int alpha_,int dp_degree_, int tp_degree_, int pp_degree_, int ep_degree_, int gpus_per_node_=8);
   void init_network();
 
   virtual vector<const Route*>* get_paths(int src, int dest);
@@ -71,7 +71,8 @@ public:
   int ep_degree;
   int region_size;
   int region_num;
-  
+  int gpus_per_node;  // GPUs per machine (configurable, was hardcoded NUM_GPU_PER_NODE=8)
+
   //elec switch setting
   Topology* elec_topology;
   int alpha;

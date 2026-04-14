@@ -57,16 +57,16 @@ void check_non_null_ocs(Route *rt)
 
 void Mixnet::set_params(int no_of_gpus)
 {
-  _no_of_nodes = no_of_gpus / NUM_GPU_PER_NODE;
+  _no_of_nodes = no_of_gpus / gpus_per_node;
 
   switchs.resize(_no_of_nodes, nullptr);
   pipes.resize(_no_of_nodes, vector<Pipe *>(_no_of_nodes));
   queues.resize(_no_of_nodes, vector<Queue *>(_no_of_nodes));
-  region_size = ep_degree * tp_degree / NUM_GPU_PER_NODE;
+  region_size = ep_degree * tp_degree / gpus_per_node;
   region_num = _no_of_nodes / region_size;
 }
 
-Mixnet::Mixnet(int no_of_gpus, mem_b queuesize, Logfile *lg, EventList &ev, FirstFit *fit, queue_type q, simtime_picosec delay,Topology* elec_topology_, int alpha_, int dp_degree_, int tp_degree_, int pp_degree_, int ep_degree_):eventlist(ev)
+Mixnet::Mixnet(int no_of_gpus, mem_b queuesize, Logfile *lg, EventList &ev, FirstFit *fit, queue_type q, simtime_picosec delay,Topology* elec_topology_, int alpha_, int dp_degree_, int tp_degree_, int pp_degree_, int ep_degree_, int gpus_per_node_):eventlist(ev)
 {
   _queuesize = queuesize;
   logfile = lg;
@@ -82,13 +82,28 @@ Mixnet::Mixnet(int no_of_gpus, mem_b queuesize, Logfile *lg, EventList &ev, Firs
   tp_degree=tp_degree_;
   pp_degree=pp_degree_;
   ep_degree=ep_degree_;
+  gpus_per_node=gpus_per_node_;
 
-  conn = std::vector<std::vector<int>>(no_of_gpus / NUM_GPU_PER_NODE, std::vector<int>(no_of_gpus / NUM_GPU_PER_NODE, 0));
+  conn = std::vector<std::vector<int>>(no_of_gpus / gpus_per_node, std::vector<int>(no_of_gpus / gpus_per_node, 0));
 
   set_params(no_of_gpus);
 
   random_connect();// generate random conn
   // weighted_connect();// generate weighted conn
+  // Debug: print initial conn matrix
+  {
+    int nm = no_of_gpus / gpus_per_node;
+    cerr << "[INIT_CONN] Initial conn matrix (" << nm << "x" << nm << "), alpha=" << alpha << ":" << endl;
+    for (int i = 0; i < nm; i++) {
+      cerr << "  node " << i << ": ";
+      int deg = 0;
+      for (int j = 0; j < nm; j++) {
+        cerr << conn[i][j] << " ";
+        if (conn[i][j] > 0) deg++;
+      }
+      cerr << " (degree=" << deg << ")" << endl;
+    }
+  }
   init_network();
 }
 
@@ -184,8 +199,8 @@ void Mixnet::init_network()
 
 vector<const Route *> *Mixnet::get_paths(int src_gpu_idx, int dest_gpu_idx) {
   // convert the gpu id into node id
-  int src = src_gpu_idx / NUM_GPU_PER_NODE;
-  int dest = dest_gpu_idx / NUM_GPU_PER_NODE;
+  int src = src_gpu_idx / gpus_per_node;
+  int dest = dest_gpu_idx / gpus_per_node;
   assert(src/region_size == dest/region_size);
   
   route_t *routeout, *routeback;
@@ -250,8 +265,8 @@ vector<const Route *> *Mixnet::get_paths(int src_gpu_idx, int dest_gpu_idx) {
 vector<const Route*>* Mixnet::get_eps_paths(int src_gpu_idx, int dest_gpu_idx) {
   // all2all task and p2p task will call this function
   // convert the gpu id into node id
-  int src = src_gpu_idx / NUM_GPU_PER_NODE;
-  int dest = dest_gpu_idx / NUM_GPU_PER_NODE;
+  int src = src_gpu_idx / gpus_per_node;
+  int dest = dest_gpu_idx / gpus_per_node;
   return elec_topology->get_paths(src, dest);
 }
 
@@ -375,7 +390,7 @@ void Mixnet::weighted_connect() {
   std::cerr << expert_traffic_matrix << std::endl;
 
   // Calculate available connections
-  int GPU_per_NODE = NUM_GPU_PER_NODE;
+  int GPU_per_NODE = gpus_per_node;
   std::vector<int> avail_conn(_no_of_nodes*GPU_per_NODE / (GPU_per_NODE * pp_degree), alpha);
   
   double num_ocs = 1.0 * alpha * tp_degree / 8;

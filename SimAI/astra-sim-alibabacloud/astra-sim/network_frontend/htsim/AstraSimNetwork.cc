@@ -212,6 +212,10 @@ struct user_param {
   bool ecs_only;       // force all traffic through ECS (no OCS)
   int os_ratio;        // oversubscription ratio for os_fattree/agg_os_fattree (default: 2)
   int rto_ms;          // TCP retransmission timeout in milliseconds (default: 1)
+  int expert_topk;     // MoE top-k routing (0=uniform, no hotspot)
+  double expert_skew;  // Zipf skew (1.0=moderate, 2.0=strong)
+  int expert_seed;     // random seed for expert routing
+  int reconf_top_n;    // skip reconfig if top-N pairs already connected (0=always reconfig)
 
   user_param() {
     workload = "";
@@ -230,6 +234,10 @@ struct user_param {
     ecs_only = false;
     os_ratio = 2;
     rto_ms = 1;
+    expert_topk = 0;
+    expert_skew = 1.0;
+    expert_seed = 42;
+    reconf_top_n = 0;
   }
 };
 
@@ -251,6 +259,10 @@ static void print_usage() {
   cout << "  --ecs_only              Force all traffic through ECS (no OCS, mixnet only)" << endl;
   cout << "  --os_ratio N            Oversubscription ratio (default: 2, os_fattree/agg_os_fattree only)" << endl;
   cout << "  --rto N                 TCP retransmission timeout in ms (default: 1)" << endl;
+  cout << "  --expert_topk N         MoE top-k routing, 0=uniform (default: 0)" << endl;
+  cout << "  --expert_skew F         Zipf skew for expert hotspot (default: 1.0)" << endl;
+  cout << "  --expert_seed N         Random seed for expert routing (default: 42)" << endl;
+  cout << "  --reconf_top_n N        Skip reconfig if top-N pairs already connected (default: 0=always reconfig, mixnet only)" << endl;
 }
 
 static int parse_params(int argc, char* argv[], struct user_param* params) {
@@ -271,6 +283,10 @@ static int parse_params(int argc, char* argv[], struct user_param* params) {
     {"ecs_only",      no_argument,       0, 'E'},
     {"os_ratio",      required_argument, 0, 'O'},
     {"rto",           required_argument, 0, 'R'},
+    {"expert_topk",   required_argument, 0, 'K'},
+    {"expert_skew",   required_argument, 0, 'S'},
+    {"expert_seed",   required_argument, 0, 'D'},
+    {"reconf_top_n",  required_argument, 0, 'n'},
     {"help",          no_argument,       0, 'h'},
     {0, 0, 0, 0}
   };
@@ -294,6 +310,10 @@ static int parse_params(int argc, char* argv[], struct user_param* params) {
       case 'E': params->ecs_only = true; break;
       case 'O': params->os_ratio = stoi(optarg); break;
       case 'R': params->rto_ms = stoi(optarg); break;
+      case 'K': params->expert_topk = stoi(optarg); break;
+      case 'S': params->expert_skew = stod(optarg); break;
+      case 'D': params->expert_seed = stoi(optarg); break;
+      case 'n': params->reconf_top_n = stoi(optarg); break;
       case 'h': print_usage(); return 1;
       default:  print_usage(); return 1;
     }
@@ -378,6 +398,7 @@ int main(int argc, char *argv[]) {
   if (g_topo_type == TOPO_MIXNET) {
     cout << "Alpha (OCS circuits): " << params.alpha << endl;
     cout << "Reconf delay: " << params.reconf_delay_us << " us" << endl;
+    cout << "Reconf top-N: " << params.reconf_top_n << " (0=always reconfig)" << endl;
     cout << "ECS only: " << (params.ecs_only ? "YES" : "NO") << endl;
   }
   cout << "DP/TP/PP/EP: " << params.dp_degree << "/" << params.tp_degree
@@ -385,12 +406,21 @@ int main(int argc, char *argv[]) {
   cout << "GPUs per server: " << params.gpus_per_server << endl;
   cout << "Iterations: " << params.iterations << endl;
   cout << "Workload: " << params.workload << endl;
+  if (params.expert_topk > 0) {
+    cout << "Expert hotspot: topk=" << params.expert_topk
+         << " skew=" << params.expert_skew
+         << " seed=" << params.expert_seed << endl;
+  }
   cout << "==========================" << endl;
 
   // Set ECS-only mode, RTO, and GPU count in entry.h
   g_force_ecs_only = params.ecs_only;
   g_rto_ms = params.rto_ms;
   g_total_gpus = gpu_num;
+  g_expert_topk = params.expert_topk;
+  g_expert_skew = params.expert_skew;
+  g_expert_seed = params.expert_seed;
+  g_reconf_top_n = params.reconf_top_n;
 
   // 1. Create htsim EventList
   EventList eventlist;
@@ -418,7 +448,7 @@ int main(int argc, char *argv[]) {
 
   if (g_topo_type == TOPO_MIXNET) {
     // OCS-ECS hybrid: FatTree (partial BW) + Mixnet OCS overlay
-    uint32_t ecs_link_speed = params.speed * (8 - params.alpha);
+    uint32_t ecs_link_speed = params.speed * (params.gpus_per_server - params.alpha);
     cout << "[htsim] ECS link speed: " << ecs_link_speed << " Mbps" << endl;
 
     fattree = new FatTreeTopology(
@@ -431,7 +461,8 @@ int main(int argc, char *argv[]) {
         NULL, eventlist, NULL, ECN,
         timeFromUs((double)params.reconf_delay_us),
         fattree, params.alpha,
-        params.dp_degree, params.tp_degree, params.pp_degree, params.ep_degree);
+        params.dp_degree, params.tp_degree, params.pp_degree, params.ep_degree,
+        params.gpus_per_server);
     g_mixnet_topo = mixnet;
     g_topology = mixnet;
 
@@ -440,7 +471,7 @@ int main(int argc, char *argv[]) {
 
   } else if (g_topo_type == TOPO_FATTREE) {
     // Full-bandwidth fat-tree (all 8 ports)
-    uint32_t full_speed = params.speed * 8;
+    uint32_t full_speed = params.speed * params.gpus_per_server;
     fattree = new FatTreeTopology(
         fattree_node, memFromPkt(params.queuesize_pkts),
         NULL, &eventlist, NULL, LOSSLESS_INPUT_ECN, full_speed);
@@ -604,6 +635,10 @@ int main(int argc, char *argv[]) {
   cout << "NVLink flows:  " << g_flow_count_nvlink << " (" << g_flow_bytes_nvlink << " bytes)" << endl;
   if (g_topo_type == TOPO_MIXNET) {
     cout << "Deferred flows (reconf): " << g_flow_count_deferred << endl;
+    cout << "Reconfigs triggered (cold): " << g_moe_reconfig_mgr.reconfig_triggered << endl;
+    cout << "Reconfigs proactive: " << g_moe_reconfig_mgr.reconfig_proactive << endl;
+    cout << "Reconfigs hidden (0 delay): " << g_moe_reconfig_mgr.reconfig_hidden << endl;
+    cout << "Reconfigs skipped: " << g_moe_reconfig_mgr.reconfig_skipped << endl;
   }
   uint64_t total_flows = g_flow_count_ocs + g_flow_count_ecs + g_flow_count_nvlink;
 
@@ -639,12 +674,13 @@ int main(int argc, char *argv[]) {
     if (g_topo_type == TOPO_MIXNET) {
       stats << "Network mode: " << (params.ecs_only ? "ECS only" : "OCS+ECS mixnet") << endl;
       stats << "Alpha (OCS circuits): " << params.alpha << endl;
-      uint32_t ecs_link_speed = params.speed * (8 - params.alpha);
+      uint32_t ecs_link_speed = params.speed * (params.gpus_per_server - params.alpha);
       stats << "ECS link speed: " << ecs_link_speed << " Mbps" << endl;
+      stats << "Reconf top-N: " << params.reconf_top_n << endl;
       stats << "Queue type (ECS): LOSSLESS_INPUT_ECN" << endl;
       stats << "Queue type (OCS): ECN" << endl;
     } else if (g_topo_type == TOPO_FATTREE) {
-      stats << "FatTree link speed: " << (params.speed * 8) << " Mbps" << endl;
+      stats << "FatTree link speed: " << (params.speed * params.gpus_per_server) << " Mbps" << endl;
       stats << "FatTree nodes: " << fattree_node << "  K=" << fattree_k << endl;
       stats << "Queue type: LOSSLESS_INPUT_ECN" << endl;
     } else if (g_topo_type == TOPO_OS_FATTREE || g_topo_type == TOPO_AGG_OS_FATTREE) {
@@ -666,6 +702,10 @@ int main(int argc, char *argv[]) {
           << (g_flow_bytes_nvlink / 1048576.0) << " MB)" << endl;
     if (g_topo_type == TOPO_MIXNET) {
       stats << "Deferred flows (reconf): " << g_flow_count_deferred << endl;
+      stats << "Reconfigs triggered (cold): " << g_moe_reconfig_mgr.reconfig_triggered << endl;
+      stats << "Reconfigs proactive: " << g_moe_reconfig_mgr.reconfig_proactive << endl;
+      stats << "Reconfigs hidden (0 delay): " << g_moe_reconfig_mgr.reconfig_hidden << endl;
+      stats << "Reconfigs skipped: " << g_moe_reconfig_mgr.reconfig_skipped << endl;
     }
     if (total_flows > 0) {
       stats << endl;

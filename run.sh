@@ -211,6 +211,9 @@ run_config() {
   local SEQ_LENGTH=$(jq -r '.model.seq_length // 1024' "$wl_cfg")
   local MICRO_BATCH=$(jq -r '.model.micro_batch // 1' "$wl_cfg")
   local GLOBAL_BATCH=$(jq -r '.model.global_batch // 32' "$wl_cfg")
+  local EXPERT_TOPK=$(jq -r '.model.expert_topk // 0' "$wl_cfg")
+  local EXPERT_SKEW=$(jq -r '.model.expert_skew // 1.0' "$wl_cfg")
+  local EXPERT_SEED=$(jq -r '.model.expert_seed // 42' "$wl_cfg")
 
   # --- 读取 topology (from topo config) ---
   local TOPO=$(jq -r '.topology.type // "fattree"' "$topo_cfg")
@@ -219,6 +222,7 @@ run_config() {
   local ALPHA=$(jq -r '.topology.alpha // 4' "$topo_cfg")
   local RECONF_DELAY=$(jq -r '.topology.reconf_delay // 10' "$topo_cfg")
   local ECS_ONLY=$(jq -r '.topology.ecs_only // false' "$topo_cfg")
+  local RECONF_TOP_N=$(jq -r '.topology.reconf_top_n // 0' "$topo_cfg")
   local OS_RATIO=$(jq -r '.topology.os_ratio // 2' "$topo_cfg")
 
   # --- 读取 simulation (from topo config) ---
@@ -270,12 +274,16 @@ run_config() {
   CMD+=(--queuesize "$QUEUESIZE")
   CMD+=(--iterations "$ITERATIONS")
   CMD+=(--rto "$RTO_MS")
+  CMD+=(--expert_topk "$EXPERT_TOPK")
+  CMD+=(--expert_skew "$EXPERT_SKEW")
+  CMD+=(--expert_seed "$EXPERT_SEED")
 
   # 拓扑特有参数
   case "$TOPO" in
     mixnet)
       CMD+=(--alpha "$ALPHA")
       CMD+=(--reconf_delay "$RECONF_DELAY")
+      CMD+=(--reconf_top_n "$RECONF_TOP_N")
       if [[ "$ECS_ONLY" == "true" ]]; then
         CMD+=(--ecs_only)
       fi

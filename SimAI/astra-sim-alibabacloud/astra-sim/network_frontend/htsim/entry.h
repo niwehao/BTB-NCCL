@@ -30,6 +30,7 @@
 #include <map>
 #include <unordered_map>
 #include <vector>
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <fstream>
@@ -87,6 +88,14 @@ int g_gpus_per_server = 8;
 bool g_force_ecs_only = false;  // When true, all cross-machine traffic uses ECS
 int g_rto_ms = 1;  // TCP retransmission timeout in ms
 int g_total_gpus = 0;  // Total GPU count, for FCT sampling
+
+// Expert hotspot parameters (MoE non-uniform all-to-all traffic)
+int g_expert_topk = 0;       // top-k routing (0=uniform, no hotspot)
+double g_expert_skew = 1.0;  // Zipf distribution skew parameter
+int g_expert_seed = 42;      // random seed for expert routing
+
+// Reconfig skip: skip OCS reconfig if top-N traffic pairs are already connected
+int g_reconf_top_n = 0;      // 0=always reconfig, >0=skip if top-N pairs covered
 
 // Global retransmission counters (accumulated as flows finish, not at end)
 uint64_t g_total_packets_sent = 0;
@@ -295,18 +304,8 @@ void htsim_flow_finish(void* ctx_ptr) {
   // Notify sender
   notify_sender_sending_finished(sid, did, all_sent, flowTag);
 
-  // Trigger reconfiguration check for AllToAll flows (skip in ECS-only mode)
-  if (flowTag.com_type == 4 && g_mixnet_topo != nullptr && !g_force_ecs_only) {
-    int src_machine = sid / g_gpus_per_server;
-    int dst_machine = did / g_gpus_per_server;
-    if (src_machine != dst_machine) {
-      // This is a cross-machine AllToAll flow that completed
-      // Defer the reconfiguration check to after LayerDemandTracker is defined
-      // We use a static function pointer set up after definition
-      extern void check_reconf_trigger(int src_machine, int dst_machine, int layer_tag);
-      check_reconf_trigger(src_machine, dst_machine, flowTag.tag_id);
-    }
-  }
+  // NOTE: Reactive reconfig trigger removed. Proactive reconfig is now handled
+  // in SendFlow() via MoEReconfigManager::on_a2a_flow_start().
 }
 
 // ======== Deferred send (for flows during reconfiguration) ========
@@ -327,104 +326,420 @@ public:
   void doNextEvent() override;  // forward declaration, defined after SendFlow
 };
 
-// ======== Demand recording and reconfiguration trigger ========
-// Mirrors ffapp.cpp's FFAlltoAll::updatetrafficmatrix() + FFTask::cleanup() logic
-// Tracks per-layer traffic demand matrices and triggers OCS reconfiguration
+// ======== Proactive MoE OCS Reconfiguration Manager ========
+// Replaces the reactive LayerDemandTracker with a proactive algorithm:
+//   - fwd dispatch: reconfig using prediction/history BEFORE flows start
+//   - fwd combine:  reuse fwd dispatch config (no reconfig), record real TM
+//   - bwd combine:  reconfig using fwd real TM BEFORE flows start
+//   - bwd dispatch: reuse bwd combine config (no reconfig)
 
-struct LayerDemandTracker {
-  // Per-region traffic matrices keyed by (layer_tag, region_id)
-  std::map<std::pair<int,int>, Matrix2D<double>*> region_traffic_matrices;
-  // Track cross-machine a2a flows CREATED and COMPLETED per (layer_tag, region_id)
-  std::map<std::pair<int,int>, int> a2a_flows_created;
-  std::map<std::pair<int,int>, int> a2a_flows_completed;
-  // Track which (layer_tag, region_id) already triggered reconfiguration
-  std::set<std::pair<int,int>> reconf_triggered;
-  // Track which layer_tags we've seen "all created" for
-  std::set<std::pair<int,int>> creation_complete;
+struct MoEBlockInfo {
+  int dispatch_layer;  // workload layer_num of moe_route (dispatch a2a)
+  int combine_layer;   // workload layer_num of moe_expert (combine a2a)
+};
 
-  // Track the last (layer_tag, region_id) seen, to detect layer transitions
-  std::set<std::pair<int,int>> active_layers;
+struct MoEReconfigManager {
+  // MoE block structure (discovered during first forward pass)
+  std::vector<MoEBlockInfo> moe_blocks;
+  bool structure_discovered = false;
 
-  void record_demand(int src_machine, int dst_machine, uint64_t flow_size,
-                     int layer_tag, int region_size) {
-    int region_id = src_machine / region_size;
-    auto key = std::make_pair(layer_tag, region_id);
+  // Reconfig statistics
+  uint64_t reconfig_triggered = 0;
+  uint64_t reconfig_skipped = 0;
+  uint64_t reconfig_proactive = 0;   // proactive reconfigs triggered at second-in-pair
+  uint64_t reconfig_hidden = 0;      // times reconfig was fully hidden (0 delay at dispatch)
 
-    // Detect new layer: if this is a new (layer_tag, region_id),
-    // mark all previously active layers as creation-complete
-    if (!active_layers.count(key)) {
-      for (auto& prev_key : active_layers) {
-        if (prev_key.second == region_id && !creation_complete.count(prev_key)) {
-          mark_creation_complete(prev_key.first, prev_key.second);
+  // Pending proactive reconfig (triggered at previous block's last a2a)
+  int pending_reconfig_for_block = -1;
+  simtime_picosec pending_reconfig_end_time = 0;
+
+  // Direction tracking
+  int last_a2a_layer_num = -1;
+  bool is_forward = true;
+  int a2a_count_in_direction = 0;  // 1-based count of a2a layers in current direction
+
+  // Iteration tracking
+  int current_iteration = 0;
+
+  // Traffic matrices: key = (block_idx, region_id)
+  std::map<std::pair<int,int>, Matrix2D<double>*> real_tm;     // recorded during fwd phase
+  std::map<std::pair<int,int>, Matrix2D<double>*> history_tm;  // real_tm from previous iteration
+
+  // Current layer demand accumulation: key = (layer_num, region_id)
+  std::map<std::pair<int,int>, Matrix2D<double>*> current_layer_tm;
+
+  // Prevent duplicate triggers
+  std::set<int> reconf_triggered_layers;
+
+  struct ReconfigResult {
+    bool should_defer;
+    simtime_picosec reconfig_end_time;
+  };
+
+  // Detect direction change and handle iteration boundary
+  // ONLY call this for NEW layer_nums (not repeated flows of same layer)
+  void detect_direction(int layer_num, int region_size) {
+    if (last_a2a_layer_num < 0) {
+      is_forward = true;
+      return;
+    }
+    if (layer_num == last_a2a_layer_num) return;  // Same layer, no direction change
+    bool new_forward = (layer_num > last_a2a_layer_num);
+    if (new_forward != is_forward) {
+      // Direction changed — finalize last layer's TM BEFORE resetting counter
+      finalize_prev_layer(region_size);
+      if (new_forward && !is_forward) {
+        // bwd → fwd: new iteration
+        rotate_iteration();
+      }
+      is_forward = new_forward;
+      a2a_count_in_direction = 0;
+      reconf_triggered_layers.clear();
+      pending_reconfig_for_block = -1;
+      pending_reconfig_end_time = 0;
+    }
+  }
+
+  // Rotate iteration: real_tm → history_tm
+  void rotate_iteration() {
+    for (auto& [key, tm] : history_tm) {
+      if (tm) delete tm;
+    }
+    history_tm.clear();
+    // Move real_tm to history_tm
+    for (auto& [key, tm] : real_tm) {
+      history_tm[key] = tm;  // transfer ownership
+    }
+    real_tm.clear();
+    // Clear per-layer accumulation
+    for (auto& [key, tm] : current_layer_tm) {
+      if (tm) delete tm;
+    }
+    current_layer_tm.clear();
+    reconf_triggered_layers.clear();
+    pending_reconfig_for_block = -1;
+    pending_reconfig_end_time = 0;
+    current_iteration++;
+  }
+
+  // Finalize previous layer's TM into block's real_tm
+  void finalize_prev_layer(int region_size) {
+    if (last_a2a_layer_num < 0 || a2a_count_in_direction <= 0) return;
+
+    int prev_pair_pos = a2a_count_in_direction;  // position of the layer being finalized
+    int block_idx_in_dir = (prev_pair_pos - 1) / 2;
+
+    // For backward pass, reverse the block index
+    int actual_block_idx = block_idx_in_dir;
+    if (!is_forward && structure_discovered) {
+      actual_block_idx = (int)moe_blocks.size() - 1 - block_idx_in_dir;
+    }
+    if (actual_block_idx < 0) return;
+
+    int region_num = (g_topomanager != nullptr) ? (int)g_topomanager->regional_topo_managers.size() : 1;
+    for (int rid = 0; rid < region_num; rid++) {
+      auto layer_key = std::make_pair(last_a2a_layer_num, rid);
+      if (current_layer_tm.find(layer_key) == current_layer_tm.end()) continue;
+
+      Matrix2D<double>* tm = current_layer_tm[layer_key];
+      auto block_key = std::make_pair(actual_block_idx, rid);
+
+      if (real_tm.find(block_key) == real_tm.end()) {
+        // First layer of this block: copy
+        real_tm[block_key] = new Matrix2D<double>(region_size, region_size);
+        real_tm[block_key]->copy_from(*tm);
+      } else {
+        // Second layer (combine): accumulate into existing real_tm
+        for (int i = 0; i < region_size; i++)
+          for (int j = 0; j < region_size; j++)
+            real_tm[block_key]->add_elem_by(i, j, tm->get_elem(i, j));
+      }
+    }
+  }
+
+  // Get prediction matrix for a given block and region
+  // Returns nullptr if no matrix available (use default topo)
+  Matrix2D<double>* get_prediction_matrix(int block_idx, int region_id) {
+    if (is_forward) {
+      if (current_iteration == 0 && block_idx == 0) {
+        return nullptr;  // Block 0, first iteration: default topo
+      }
+      if (current_iteration == 0) {
+        // First iteration, block K>0: use previous block's real_tm
+        auto prev_key = std::make_pair(block_idx - 1, region_id);
+        if (real_tm.find(prev_key) != real_tm.end()) return real_tm[prev_key];
+        return nullptr;
+      }
+      // Iteration 1+: use own history
+      auto key = std::make_pair(block_idx, region_id);
+      if (history_tm.find(key) != history_tm.end()) return history_tm[key];
+      return nullptr;
+    } else {
+      // Backward: use real_tm from forward phase
+      // block_idx_in_dir → actual block (reversed)
+      int actual_block = (structure_discovered) ?
+          (int)moe_blocks.size() - 1 - block_idx : block_idx;
+      auto key = std::make_pair(actual_block, region_id);
+      if (real_tm.find(key) != real_tm.end()) return real_tm[key];
+      return nullptr;
+    }
+  }
+
+  // Check if reconfig can be skipped: top-N traffic pairs already have OCS connections
+  bool should_skip_reconfig(int block_idx, int region_size) {
+    if (g_reconf_top_n <= 0 || g_mixnet_topo == nullptr || g_topomanager == nullptr) return false;
+
+    // Never skip on first iteration — let greedy algorithm optimize initial random conn
+    if (current_iteration == 0) return false;
+
+    int num_regions = (int)g_topomanager->regional_topo_managers.size();
+    for (int rid = 0; rid < num_regions; rid++) {
+      Matrix2D<double>* pred = get_prediction_matrix(block_idx, rid);
+      if (pred == nullptr) continue;
+
+      int rs = region_size;
+      int start_node = rid * rs;
+
+      // Collect all (i,j) pairs with their traffic values
+      std::vector<std::pair<double, std::pair<int,int>>> pairs;
+      for (int i = 0; i < rs; i++) {
+        for (int j = 0; j < rs; j++) {
+          if (i == j) continue;
+          double val = pred->get_elem(i, j);
+          if (val > 0) {
+            pairs.push_back({val, {i, j}});
+          }
         }
       }
-      active_layers.insert(key);
+
+      // Sort descending by traffic volume
+      std::sort(pairs.begin(), pairs.end(),
+                [](const auto& a, const auto& b) { return a.first > b.first; });
+
+      // Check if top-N pairs all have OCS connections
+      int check_count = std::min(g_reconf_top_n, (int)pairs.size());
+      for (int k = 0; k < check_count; k++) {
+        int i = pairs[k].second.first;
+        int j = pairs[k].second.second;
+        if (g_mixnet_topo->conn[i + start_node][j + start_node] <= 0) {
+          return false;  // At least one top-N pair not connected → need reconfig
+        }
+      }
     }
-
-    if (region_traffic_matrices.find(key) == region_traffic_matrices.end()) {
-      region_traffic_matrices[key] = new Matrix2D<double>(region_size, region_size);
-    }
-    int local_src = src_machine % region_size;
-    int local_dst = dst_machine % region_size;
-    region_traffic_matrices[key]->add_elem_by(local_src, local_dst, (double)flow_size);
-    a2a_flows_created[key]++;
+    return true;  // All top-N pairs already connected in all regions → skip
   }
 
-  // Called when we know all flows for a layer_tag have been created
-  // (detected when a new layer starts or from heuristic)
-  void mark_creation_complete(int layer_tag, int region_id) {
-    auto key = std::make_pair(layer_tag, region_id);
-    creation_complete.insert(key);
-    maybe_trigger_reconf(key);
-  }
+  // Trigger proactive reconfig for all regions
+  void trigger_proactive_reconfig(int block_idx, int layer_num) {
+    if (g_demand_recorder == nullptr || g_topomanager == nullptr) return;
 
-  void flow_completed(int src_machine, int dst_machine, int layer_tag, int region_size) {
-    int region_id = src_machine / region_size;
-    auto key = std::make_pair(layer_tag, region_id);
-    a2a_flows_completed[key]++;
-    maybe_trigger_reconf(key);
-  }
+    int num_regions = (int)g_topomanager->regional_topo_managers.size();
+    int slot = block_idx % g_demand_recorder->layer_num;
 
-  void maybe_trigger_reconf(std::pair<int,int> key) {
-    // Only trigger when ALL created flows have completed AND we know creation is done
-    if (reconf_triggered.count(key)) return;
-    if (!creation_complete.count(key)) return;
-    if (a2a_flows_completed[key] < a2a_flows_created[key]) return;
+    for (int rid = 0; rid < num_regions; rid++) {
+      Matrix2D<double>* pred = get_prediction_matrix(block_idx, rid);
+      if (pred == nullptr) continue;
 
-    // All flows for this (layer_tag, region_id) are done
-    reconf_triggered.insert(key);
-    int layer_tag = key.first;
-    int region_id = key.second;
+      g_demand_recorder->append_traffic_matrix(slot, rid, *pred);
 
-    if (g_demand_recorder != nullptr && g_topomanager != nullptr &&
-        region_traffic_matrices.count(key)) {
-      Matrix2D<double>* tm = region_traffic_matrices[key];
-
-      g_demand_recorder->append_traffic_matrix(layer_tag % g_demand_recorder->layer_num,
-                                                region_id, *tm);
-
-      RegionalTopoManager* rtm = g_topomanager->regional_topo_managers[region_id];
-      rtm->current_layer_id = layer_tag % g_demand_recorder->layer_num;
-
-      cout << "[RECONF] Triggering reconfiguration for region " << region_id
-           << " layer_tag=" << layer_tag
-           << " created=" << a2a_flows_created[key]
-           << " completed=" << a2a_flows_completed[key]
-           << " at time=" << timeAsMs(g_eventlist->now()) << "ms" << endl;
-
+      RegionalTopoManager* rtm = g_topomanager->regional_topo_managers[rid];
+      rtm->current_layer_id = slot;
+      // Pre-set reconfig_end_time so deferred check works immediately
+      rtm->reconfig_end_time = g_eventlist->now() + rtm->reconf_delay + 1;
+      // Schedule the actual reconfig event
       g_eventlist->sourceIsPending(*rtm, g_eventlist->now());
     }
   }
+
+  // Main entry point: called from SendFlow() for each a2a flow
+  ReconfigResult on_a2a_flow_start(int layer_num, int src_machine, int dst_machine,
+                                    uint64_t flow_size, int region_size) {
+    ReconfigResult result = {false, 0};
+
+    // Only process cross-machine flows
+    if (src_machine == dst_machine) return result;
+
+    // Detect direction change
+    detect_direction(layer_num, region_size);
+
+    // New layer transition?
+    bool is_new_layer = (layer_num != last_a2a_layer_num);
+    if (is_new_layer) {
+      // Finalize previous layer's TM
+      finalize_prev_layer(region_size);
+
+      // Increment counter
+      a2a_count_in_direction++;
+      last_a2a_layer_num = layer_num;
+
+      // MoE block structure discovery (during first forward pass)
+      if (is_forward && !structure_discovered) {
+        int pair_pos = a2a_count_in_direction;
+        if (pair_pos % 2 == 1) {
+          // 1st in pair: dispatch
+          MoEBlockInfo info;
+          info.dispatch_layer = layer_num;
+          info.combine_layer = -1;
+          moe_blocks.push_back(info);
+        } else {
+          // 2nd in pair: combine
+          int block_idx = (pair_pos - 1) / 2;
+          if (block_idx < (int)moe_blocks.size()) {
+            moe_blocks[block_idx].combine_layer = layer_num;
+          }
+        }
+      }
+      // Mark structure as discovered when backward starts
+      if (!is_forward && !structure_discovered && !moe_blocks.empty()) {
+        structure_discovered = true;
+      }
+
+      // Determine pair position and block index
+      int pair_pos = a2a_count_in_direction;
+      bool is_first_in_pair = (pair_pos % 2 == 1);
+      int block_idx_in_dir = (pair_pos - 1) / 2;
+
+      // ---- FIRST-IN-PAIR: block's first a2a (fwd dispatch / bwd combine) ----
+      if (is_first_in_pair && !reconf_triggered_layers.count(layer_num)) {
+        reconf_triggered_layers.insert(layer_num);
+
+        if (pending_reconfig_for_block == block_idx_in_dir) {
+          // Proactive reconfig was triggered at previous block's last a2a
+          if (g_eventlist->now() >= pending_reconfig_end_time) {
+            // Already done — flows proceed immediately with zero delay
+            reconfig_hidden++;
+            static int hidden_log = 0;
+            if (hidden_log < 20) {
+              cout << "[RECONFIG_HIDDEN] layer=" << layer_num
+                   << " block=" << block_idx_in_dir
+                   << " reconfig completed before dispatch, 0 delay" << endl;
+              hidden_log++;
+            }
+          } else {
+            // Still in progress — defer for remaining time only
+            result.should_defer = true;
+            result.reconfig_end_time = pending_reconfig_end_time;
+            static int partial_log = 0;
+            if (partial_log < 20) {
+              simtime_picosec remaining = pending_reconfig_end_time - g_eventlist->now();
+              cout << "[RECONFIG_PARTIAL] layer=" << layer_num
+                   << " block=" << block_idx_in_dir
+                   << " remaining=" << (remaining / 1000) << "ns" << endl;
+              partial_log++;
+            }
+          }
+          pending_reconfig_for_block = -1;
+          pending_reconfig_end_time = 0;
+        } else {
+          // No pending reconfig — cold start (iter0 block0 or edge case)
+          // Fall back to immediate reconfig + full defer
+          bool has_matrix = false;
+          int num_regions = (g_topomanager != nullptr) ?
+              (int)g_topomanager->regional_topo_managers.size() : 0;
+          for (int rid = 0; rid < num_regions; rid++) {
+            if (get_prediction_matrix(block_idx_in_dir, rid) != nullptr) {
+              has_matrix = true;
+              break;
+            }
+          }
+          if (has_matrix) {
+            if (should_skip_reconfig(block_idx_in_dir, region_size)) {
+              reconfig_skipped++;
+              int slot = block_idx_in_dir % g_demand_recorder->layer_num;
+              for (int rid = 0; rid < num_regions; rid++) {
+                Matrix2D<double>* pred = get_prediction_matrix(block_idx_in_dir, rid);
+                if (pred != nullptr) {
+                  g_demand_recorder->append_traffic_matrix(slot, rid, *pred);
+                }
+              }
+            } else {
+              reconfig_triggered++;
+              trigger_proactive_reconfig(block_idx_in_dir, layer_num);
+              simtime_picosec max_end = 0;
+              for (int rid = 0; rid < num_regions; rid++) {
+                RegionalTopoManager* rtm = g_topomanager->regional_topo_managers[rid];
+                if (rtm->reconfig_end_time > max_end) max_end = rtm->reconfig_end_time;
+              }
+              result.should_defer = true;
+              result.reconfig_end_time = max_end;
+            }
+          }
+        }
+      }
+
+      // ---- SECOND-IN-PAIR: block's last a2a (fwd combine / bwd dispatch) ----
+      // Proactively trigger reconfig for the NEXT block, overlapping with current a2a + computation
+      if (!is_first_in_pair && !reconf_triggered_layers.count(layer_num)) {
+        reconf_triggered_layers.insert(layer_num);
+
+        int next_block_idx = block_idx_in_dir + 1;
+
+        // Check if next block has a prediction matrix
+        bool has_next_matrix = false;
+        int num_regions = (g_topomanager != nullptr) ?
+            (int)g_topomanager->regional_topo_managers.size() : 0;
+        for (int rid = 0; rid < num_regions; rid++) {
+          if (get_prediction_matrix(next_block_idx, rid) != nullptr) {
+            has_next_matrix = true;
+            break;
+          }
+        }
+
+        if (has_next_matrix) {
+          if (should_skip_reconfig(next_block_idx, region_size)) {
+            reconfig_skipped++;
+            int slot = next_block_idx % g_demand_recorder->layer_num;
+            for (int rid = 0; rid < num_regions; rid++) {
+              Matrix2D<double>* pred = get_prediction_matrix(next_block_idx, rid);
+              if (pred != nullptr) {
+                g_demand_recorder->append_traffic_matrix(slot, rid, *pred);
+              }
+            }
+          } else {
+            // Trigger proactive reconfig for next block — do NOT defer current flows
+            reconfig_proactive++;
+            // Set proactive mode so TCP flows won't be paused
+            for (int rid = 0; rid < num_regions; rid++) {
+              RegionalTopoManager* rtm = g_topomanager->regional_topo_managers[rid];
+              rtm->proactive_mode = true;
+            }
+            trigger_proactive_reconfig(next_block_idx, layer_num);
+            simtime_picosec max_end = 0;
+            for (int rid = 0; rid < num_regions; rid++) {
+              RegionalTopoManager* rtm = g_topomanager->regional_topo_managers[rid];
+              if (rtm->reconfig_end_time > max_end) max_end = rtm->reconfig_end_time;
+              rtm->proactive_mode = false;
+            }
+            pending_reconfig_for_block = next_block_idx;
+            pending_reconfig_end_time = max_end;
+            static int proactive_log = 0;
+            if (proactive_log < 20) {
+              cout << "[RECONFIG_PROACTIVE] at layer=" << layer_num
+                   << " block=" << block_idx_in_dir
+                   << " for next_block=" << next_block_idx << endl;
+              proactive_log++;
+            }
+            // result.should_defer remains false — current combine/dispatch flows proceed
+          }
+        }
+      }
+    }
+
+    // Always accumulate real demand (even for deferred flows when they re-enter)
+    int region_id = src_machine / region_size;
+    auto layer_key = std::make_pair(layer_num, region_id);
+    if (current_layer_tm.find(layer_key) == current_layer_tm.end()) {
+      current_layer_tm[layer_key] = new Matrix2D<double>(region_size, region_size);
+    }
+    int local_src = src_machine % region_size;
+    int local_dst = dst_machine % region_size;
+    current_layer_tm[layer_key]->add_elem_by(local_src, local_dst, (double)flow_size);
+
+    return result;
+  }
 };
 
-static LayerDemandTracker g_demand_tracker;
-
-// Called from htsim_flow_finish when a cross-machine AllToAll flow completes
-void check_reconf_trigger(int src_machine, int dst_machine, int layer_tag) {
-  if (g_mixnet_topo == nullptr) return;
-  g_demand_tracker.flow_completed(src_machine, dst_machine, layer_tag,
-                                   g_mixnet_topo->region_size);
-}
+static MoEReconfigManager g_moe_reconfig_mgr;
 
 // ======== SendFlow: core function replacing NS-3 RDMA with htsim TCP ========
 // Global counters for OCS/ECS tracking
@@ -477,6 +792,49 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
     return;
   }
 
+  // ---- Proactive reconfig check (BEFORE routing decision, a2a only) ----
+  if (g_topo_type == TOPO_MIXNET && com_type == 4 && g_mixnet_topo != nullptr && !g_force_ecs_only) {
+    int layer_num = request->flowTag.layer_num;
+    auto reconf_result = g_moe_reconfig_mgr.on_a2a_flow_start(
+        layer_num, src_machine, dst_machine, maxPacketCount, g_mixnet_topo->region_size);
+
+    if (reconf_result.should_defer) {
+      // Proactive reconfig triggered — defer this flow
+      g_flow_count_deferred++;
+      DeferredSendData dsd;
+      dsd.src = src; dsd.dst = dst;
+      dsd.count = maxPacketCount;
+      dsd.msg_handler = msg_handler;
+      dsd.fun_arg = fun_arg;
+      dsd.tag = tag;
+      dsd.request = *request;
+      DeferredSendEvent* ev = new DeferredSendEvent(*g_eventlist, dsd);
+      g_eventlist->sourceIsPending(*ev, reconf_result.reconfig_end_time);
+      return;
+    }
+  }
+
+  // ---- Ongoing reconfig defer check (all a2a flows, not just OCS) ----
+  if (g_topo_type == TOPO_MIXNET && com_type == 4 && g_topomanager != nullptr && g_mixnet_topo != nullptr) {
+    int region_id = src_machine / g_mixnet_topo->region_size;
+    if (region_id < (int)g_topomanager->regional_topo_managers.size()) {
+      RegionalTopoManager* rtm = g_topomanager->regional_topo_managers[region_id];
+      if (rtm->reconfig_end_time > 0 && g_eventlist->now() < rtm->reconfig_end_time) {
+        g_flow_count_deferred++;
+        DeferredSendData dsd;
+        dsd.src = src; dsd.dst = dst;
+        dsd.count = maxPacketCount;
+        dsd.msg_handler = msg_handler;
+        dsd.fun_arg = fun_arg;
+        dsd.tag = tag;
+        dsd.request = *request;
+        DeferredSendEvent* ev = new DeferredSendEvent(*g_eventlist, dsd);
+        g_eventlist->sourceIsPending(*ev, rtm->reconfig_end_time);
+        return;
+      }
+    }
+  }
+
   // ---- Routing decision ----
   bool use_ocs = false;
 
@@ -514,42 +872,6 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
       cout << "[SendFlow] ECS: src=" << src << "(m" << src_machine << ") dst=" << dst
            << "(m" << dst_machine << ") size=" << maxPacketCount
            << " com_type=" << com_type << endl;
-    }
-  }
-
-  // Record traffic demand for reconfiguration (mixnet only)
-  if (g_topo_type == TOPO_MIXNET && com_type == 4 && g_mixnet_topo != nullptr && !g_force_ecs_only) {
-    int layer_tag = request->flowTag.tag_id;
-    g_demand_tracker.record_demand(src_machine, dst_machine, maxPacketCount,
-                                    layer_tag, g_mixnet_topo->region_size);
-  }
-
-  // Check if OCS region is under reconfiguration (mixnet only)
-  if (use_ocs && g_topomanager != nullptr) {
-    int region_id = src_machine / g_mixnet_topo->region_size;
-    if (region_id < (int)g_topomanager->regional_topo_managers.size()) {
-      RegionalTopoManager* rtm = g_topomanager->regional_topo_managers[region_id];
-      if (rtm->status == RegionalTopoManager::TopoStatus::TOPO_RECONF) {
-        simtime_picosec resume_time = rtm->reconfig_end_time;
-        if (g_eventlist->now() < resume_time) {
-          g_flow_count_deferred++;
-          if (g_flow_count_deferred <= 5) {
-            cout << "[SendFlow] DEFERRED (reconf): src=" << src << " dst=" << dst
-                 << " region=" << region_id
-                 << " resume_at=" << timeAsMs(resume_time) << "ms" << endl;
-          }
-          DeferredSendData dsd;
-          dsd.src = src; dsd.dst = dst;
-          dsd.count = maxPacketCount;
-          dsd.msg_handler = msg_handler;
-          dsd.fun_arg = fun_arg;
-          dsd.tag = tag;
-          dsd.request = *request;
-          DeferredSendEvent* ev = new DeferredSendEvent(*g_eventlist, dsd);
-          g_eventlist->sourceIsPending(*ev, resume_time);
-          return;
-        }
-      }
     }
   }
 

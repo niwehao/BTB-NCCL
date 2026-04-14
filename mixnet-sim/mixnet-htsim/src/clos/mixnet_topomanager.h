@@ -86,6 +86,7 @@ public:
   All2AllTrafficRecorder * demandrecorder;
   uint64_t non_empty_queues;
   std::vector<std::vector<int>> reconfig_conn_matrix;  // Store the conn matrix computed in start_reconf
+  bool proactive_mode = false;  // When true, skip TCP pause during reconfig (proactive pre-reconfig)
 };
 
 class MixnetTopoManager {

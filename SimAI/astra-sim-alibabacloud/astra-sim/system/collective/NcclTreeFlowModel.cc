@@ -235,6 +235,33 @@ void NcclTreeFlowModel::run(EventType event, CallData* data) {
     for (int i = 0; i < parallel_reduce; i++) {
       #ifndef PHY_MTP
       init_recv_ready();
+      // Pre-post recv for a2a incoming flows with correct sizes.
+      // ready() uses the SEND flow's size for recv, which is wrong when
+      // flow sizes are non-uniform (e.g., expert hotspot). Pre-posting
+      // with correct incoming sizes prevents recv size mismatch deadlocks.
+      if (comType == ComType::All_to_All) {
+        for (const auto& f : _flow_models) {
+          if (f.second.dest != id) continue;
+          if (f.second.chunk_id != 0) continue;
+          sim_request rcv_req;
+          rcv_req.vnet = this->stream->current_queue_id;
+          rcv_req.layerNum = layer_num;
+          rcv_req.reqCount = f.second.flow_size;
+          rcv_req.tag = f.second.channel_id;
+          RecvPacketEventHadndlerData* ehd = new RecvPacketEventHadndlerData(
+              stream, stream->owner->id, EventType::PacketReceived,
+              f.second.src, 1);
+          ehd->flowTag.child_flow_id = -1;
+          ehd->flowTag.current_flow_id = -1;
+          ehd->flowTag.channel_id = f.second.channel_id;
+          ehd->flowTag.tag_id = layer_num * f.second.chunk_count * m_channels
+              + f.second.chunk_count * f.second.channel_id + f.second.chunk_id;
+          stream->owner->front_end_sim_recv(
+              0, Sys::dummy_data, f.second.flow_size, UINT8,
+              f.second.src, f.second.channel_id, &rcv_req,
+              &Sys::handleEvent, ehd);
+        }
+      }
       #endif
       for(int j = 0; j < m_channels; j ++) {
         for(const auto flow_model : _flow_models) {
@@ -587,6 +614,7 @@ bool NcclTreeFlowModel::ready(int channel_id, int flow_id) {
   else
     snd_req.flowTag.nvls_on = false;
   snd_req.flowTag.com_type = static_cast<int>(this->comType);
+  snd_req.flowTag.layer_num = layer_num;
   SendPacketEventHandlerData* send_ehd = new SendPacketEventHandlerData(
       stream,
       id,
@@ -720,6 +748,7 @@ bool NcclTreeFlowModel::phy_ready(int channel_id,int flow_id) {
   else
     snd_req.flowTag.nvls_on = false;
   snd_req.flowTag.com_type = static_cast<int>(this->comType);
+  snd_req.flowTag.layer_num = layer_num;
   SendPacketEventHandlerData* send_ehd = new SendPacketEventHandlerData(
       stream,
       id,

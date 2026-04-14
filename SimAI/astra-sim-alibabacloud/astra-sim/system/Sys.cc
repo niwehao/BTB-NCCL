@@ -1422,7 +1422,7 @@ std::shared_ptr<void> Sys::generate_flow_model(ParallelStrategy comm_ps, uint64_
         current_state = MockNccl::State::Weight_Gradient;
         break;
     }
-    return  pComm->get_flow_model(data_size,collective_type,this->workload->index,current_state);
+    return  pComm->get_flow_model(data_size,collective_type,this->workload->index,current_state,this->workload->pass_counter);
 }
 
 DataSet* Sys::generate_collective(

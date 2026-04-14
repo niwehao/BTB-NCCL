@@ -20,8 +20,15 @@
 #include <queue>
 #include <cmath>
 #include <algorithm>
+#include <random>
 #include "astra-sim/system/MockNcclLog.h"
 using namespace std;
+
+// Expert hotspot globals (defined in entry.h, set in AstraSimNetwork.cc main)
+extern int g_expert_topk;
+extern double g_expert_skew;
+extern int g_expert_seed;
+
 namespace MockNccl {
   MockNcclGroup::MockNcclGroup(int _ngpus,int _gpus_per_nodes,int _TP_size,int _DP_size,int _PP_size,int _EP_size,int _DP_EP_size,std::vector<int>_NVSwitch,GPUType _gpu_type):g_flow_id(0),gpu_type(_gpu_type){
     /*init groups
@@ -298,7 +305,7 @@ namespace MockNccl {
     return ringchannels;
   }
   
-  std::shared_ptr<void> MockNcclGroup::getFlowModels(GroupType type , int rank, AstraSim::ComType op,uint64_t data_size,int layer_num,State loopstate){
+  std::shared_ptr<void> MockNcclGroup::getFlowModels(GroupType type , int rank, AstraSim::ComType op,uint64_t data_size,int layer_num,State loopstate,int pass_counter){
     std::string flow_model_name;
     GroupInfo gp_info;
     int gp_idx;
@@ -327,6 +334,9 @@ namespace MockNccl {
         break;
     }
     flow_model_name = flow_model_name + "_" + std::to_string(gp_idx) + "_" + std::to_string(layer_num) + "_" + std::to_string(static_cast<int>(loopstate)) + "_" + std::to_string(static_cast<int>(op)) + "_" + std::to_string(data_size);
+    // Expert hotspot: same layer reuses the same flow model across iterations
+    // (no pass_counter in cache key), matching real MoE behavior where
+    // hot experts stay hot across batches.
     if(flow_models.count(flow_model_name)){
       FlowName2nums[flow_model_name] ++;
       std::shared_ptr<void> presult;
@@ -337,13 +347,13 @@ namespace MockNccl {
       }
       return presult;
     } else {
-      flow_models[flow_model_name] = genFlowModels(type,rank,op,data_size);
+      flow_models[flow_model_name] = genFlowModels(type,rank,op,data_size,layer_num,static_cast<int>(loopstate),pass_counter);
       FlowName2nums[flow_model_name]= 1;
       return flow_models[flow_model_name][rank];
     }
   }
 
-  std::map<int,std::shared_ptr<FlowModels>> MockNcclGroup::genFlowModels(GroupType type , int rank, AstraSim::ComType op,uint64_t data_size){
+  std::map<int,std::shared_ptr<FlowModels>> MockNcclGroup::genFlowModels(GroupType type , int rank, AstraSim::ComType op,uint64_t data_size,int layer_num,int loopstate,int pass_counter){
     switch (op) {
       case AstraSim::ComType::All_Reduce:
         return genAllReduceFlowModels(type,rank,data_size);
@@ -352,23 +362,49 @@ namespace MockNccl {
       case AstraSim::ComType::Reduce_Scatter:
         return genReduceScatterFlowModels(type,rank,data_size);
       case AstraSim::ComType::All_to_All:
-        return genAlltoAllFlowModels(type,rank,data_size);
+        return genAlltoAllFlowModels(type,rank,data_size,layer_num,loopstate,pass_counter);
       default:
         break;
     }
     return {};
   }
 
-  std::map<int,std::shared_ptr<FlowModels>> MockNcclGroup::genAlltoAllFlowModels(GroupType type, int rank, uint64_t data_size){
+  // Generate Zipf-distributed weights for expert popularity
+  static std::vector<double> generate_zipf_weights(int n, double s, std::mt19937& rng) {
+    std::vector<double> weights(n);
+    for (int k = 0; k < n; k++) {
+      weights[k] = 1.0 / pow(k + 1, s);
+    }
+    std::shuffle(weights.begin(), weights.end(), rng);
+    return weights;
+  }
+
+  // Keep only top-k largest weights, zero out the rest
+  static void apply_topk(std::vector<double>& weights, int topk) {
+    int n = (int)weights.size();
+    if (topk <= 0 || topk >= n) return;
+    std::vector<double> sorted_w = weights;
+    std::nth_element(sorted_w.begin(), sorted_w.begin() + topk, sorted_w.end(), std::greater<double>());
+    double threshold = sorted_w[topk - 1];
+    int count = 0;
+    for (auto& w : weights) {
+      if (w > threshold) {
+        count++;
+      } else if (w == threshold && count < topk) {
+        count++;
+      } else {
+        w = 0.0;
+      }
+    }
+  }
+
+  std::map<int,std::shared_ptr<FlowModels>> MockNcclGroup::genAlltoAllFlowModels(GroupType type, int rank, uint64_t data_size, int layer_num, int loopstate, int pass_counter){
     FlowModels result = {};
     std::map<int,FlowModels>rank2flowmodels;
     std::map<int,std::shared_ptr<FlowModels>>rank2pflowmodels;
     SingleFlow tmp_result;
     uint64_t chunksize;
-    uint64_t send_size;
     int nranks;
-    int chunkcount;
-    int chunkid;
     GroupInfo gp_info;
     int gp_idx;
     RingChannels ringchannels;
@@ -382,22 +418,67 @@ namespace MockNccl {
       gp_info = AllGroups[gp_idx];
     }
     nranks = gp_info.nRanks;
-    chunkcount = nranks - 1;
-    chunksize = data_size / nranks;
-    data_size = data_size / nranks;
-    for (int i = 0; i < gp_info.Ranks.size(); i++) {
-      std::vector<int> prev;
-      for(int j = 0;j<gp_info.Ranks.size();j++) {
-        if(i == j) continue;
-        else prev.push_back(gp_info.Ranks[j]);  
+
+    if (g_expert_topk <= 0) {
+      // ---- Original uniform logic ----
+      chunksize = data_size / nranks;
+      data_size = data_size / nranks;
+      for (int i = 0; i < (int)gp_info.Ranks.size(); i++) {
+        std::vector<int> prev;
+        for(int j = 0; j < (int)gp_info.Ranks.size(); j++) {
+          if(i == j) continue;
+          else prev.push_back(gp_info.Ranks[j]);
+        }
+        for(int j = 0; j < (int)gp_info.Ranks.size(); j++){
+          if(i == j) continue;
+          tmp_result = SingleFlow(g_flow_id,gp_info.Ranks[i],gp_info.Ranks[j],chunksize,prev,{},{},0,0,1,"RING");
+          result[std::make_pair(0, g_flow_id)] = tmp_result;
+          g_flow_id++;
+        }
       }
-      for(int j=0;j<gp_info.Ranks.size();j++){
-        if(i == j ) continue;
-        tmp_result = SingleFlow(g_flow_id,gp_info.Ranks[i],gp_info.Ranks[j],chunksize,prev,{},{},0,0,1,"RING");
-        result[std::make_pair(0, g_flow_id)] = tmp_result;
-        g_flow_id++;
+    } else {
+      // ---- Non-uniform expert hotspot logic ----
+      // Use Zipf distribution to vary per-pair flow sizes while keeping
+      // the same flow structure as uniform (all pairs present, same prev lists).
+      // per_src_budget = total bytes each src sends to ALL other ranks
+      // = chunksize * (nranks-1), matching uniform total traffic volume.
+      uint64_t chunksize_hotspot = data_size / nranks;
+      uint64_t per_src_budget = chunksize_hotspot * (nranks - 1);
+
+      for (int i = 0; i < (int)gp_info.Ranks.size(); i++) {
+        // Seed depends on layer and src rank only (NOT pass_counter),
+        // so the same layer has identical expert distribution across iterations.
+        uint32_t seed = (uint32_t)g_expert_seed
+                      ^ ((uint32_t)layer_num * 9973u)
+                      ^ ((uint32_t)i * 1013u);
+        std::mt19937 rng(seed);
+
+        auto weights = generate_zipf_weights(nranks, g_expert_skew, rng);
+        apply_topk(weights, g_expert_topk);
+
+        // Normalize weights
+        double wsum = 0;
+        for (auto w : weights) wsum += w;
+        if (wsum <= 0) wsum = 1.0;
+
+        // Build prev list (all non-self ranks, same as uniform)
+        std::vector<int> prev;
+        for (int j = 0; j < (int)gp_info.Ranks.size(); j++) {
+          if (i == j) continue;
+          prev.push_back(gp_info.Ranks[j]);
+        }
+
+        for (int j = 0; j < (int)gp_info.Ranks.size(); j++) {
+          if (i == j) continue;
+          uint64_t flow_sz = (uint64_t)((double)per_src_budget * weights[j] / wsum);
+          if (flow_sz == 0) flow_sz = 1;  // minimum 1 byte to keep flow structure intact
+          tmp_result = SingleFlow(g_flow_id, gp_info.Ranks[i], gp_info.Ranks[j], flow_sz, prev, {}, {}, 0, 0, 1, "RING");
+          result[std::make_pair(0, g_flow_id)] = tmp_result;
+          g_flow_id++;
+        }
       }
     }
+
     for(auto flow_models_it = result.begin();flow_models_it!=result.end();flow_models_it++){
       int src = flow_models_it->second.src;
       int dst = flow_models_it->second.dest;

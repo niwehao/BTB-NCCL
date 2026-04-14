@@ -114,7 +114,7 @@ namespace MockNccl {
     MockNccl::TreeChannels get_treechannels();
     MockNccl::TreeChannels get_nvls_channels();
     MockNccl::NVLStreechannels get_nvls_tree_channels();
-    std::shared_ptr<void> get_flow_model(uint64_t data_size,AstraSim::ComType collective_type,int layer_num,State loopstate);
+    std::shared_ptr<void> get_flow_model(uint64_t data_size,AstraSim::ComType collective_type,int layer_num,State loopstate,int pass_counter=0);
     struct ncclInfo* get_algo_proto_info(uint64_t data_size,AstraSim::ComType collective_type);
   };
 }
