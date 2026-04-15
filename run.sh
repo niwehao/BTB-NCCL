@@ -214,6 +214,7 @@ run_config() {
   local EXPERT_TOPK=$(jq -r '.model.expert_topk // 0' "$wl_cfg")
   local EXPERT_SKEW=$(jq -r '.model.expert_skew // 1.0' "$wl_cfg")
   local EXPERT_SEED=$(jq -r '.model.expert_seed // 42' "$wl_cfg")
+  local MOE_VOLATILITY=$(jq -r '.model.moe_volatility // 1' "$wl_cfg")
 
   # --- 读取 topology (from topo config) ---
   local TOPO=$(jq -r '.topology.type // "fattree"' "$topo_cfg")
@@ -277,6 +278,7 @@ run_config() {
   CMD+=(--expert_topk "$EXPERT_TOPK")
   CMD+=(--expert_skew "$EXPERT_SKEW")
   CMD+=(--expert_seed "$EXPERT_SEED")
+  CMD+=(--moe_volatility "$MOE_VOLATILITY")
 
   # 拓扑特有参数
   case "$TOPO" in

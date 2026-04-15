@@ -18,6 +18,7 @@ extern int g_total_gpus;
 ////////////////////////////////////////////////////////////////
 DemandRecorder *TcpSrc::demand_recorder = nullptr;
 bool TcpSrc::tcp_flow_paused = false;
+bool (*TcpSrc::on_rtx_stuck)(TcpSrc*) = nullptr;
 
 TcpSrc::TcpSrc(TcpLogger *logger, TrafficLogger *pktlogger, ofstream *_fstream_out,
 							 EventList &eventlist, int flow_src, int flow_dst,
@@ -189,6 +190,26 @@ void TcpSrc::replace_route(const Route *newroute)
 	_last_ping = timeInf;
 
 	//  Printf("Wiating for ack %d to delete\n",_last_packet_with_old_route);
+}
+
+void TcpSrc::reroute_to(const Route *newfwd, const Route *newback)
+{
+	// Safe mid-flight reroute: used when the OCS circuit this flow was using
+	// gets torn down by a reconfig and its queues become bitrate=0 (permanently paused).
+	// We swap in fresh ECS routes. In-flight packets carry their own const Route*
+	// pointer captured at packet creation time, so they are not affected; future
+	// sends/retransmits will go via the new route.
+	//
+	// Forward: reuse replace_route() to keep the old route alive until all packets
+	// still referencing it have been ACKed (avoids dangling references).
+	if (newfwd) replace_route(newfwd);
+	// Reverse: the TcpSink uses _route when generating ACKs. ACKs take a fresh
+	// reference to the route via TcpAck::newpkt(... *rt ...), so already-created
+	// ACKs are unaffected by the swap. Leak the old reverse route (small, bounded
+	// to #reroutes) rather than risk dangling the in-flight ACKs.
+	if (_sink && newback) {
+		_sink->_route = newback;
+	}
 }
 
 void TcpSrc::connect(const Route &routeout, const Route &routeback, TcpSink &sink,
@@ -733,6 +754,12 @@ void TcpSrc::rtx_timer_hook(simtime_picosec now, simtime_picosec period)
 	 << _mdev/1000000000 << " RTT "<< _rtt/1000000000 << " SEQ " << _last_acked / _mss << " HSENT "  << _highest_sent
 	 << " CWND "<< _cwnd/_mss << " FAST RECOVERY? " << 	_in_fast_recovery << " Flow ID "
 	 << str() << " SRC " << _flow_src << " DST " << _flow_dst << endl;
+
+	// Dead-OCS-route self-heal: if topology layer registered a hook, let it inspect
+	// this flow's route and possibly swap to ECS before we enter exponential backoff.
+	if (on_rtx_stuck) {
+		on_rtx_stuck(this);
+	}
 
 	// here we can run into phase effects because the timer is checked
 	// only periodically for ALL flows but if we keep the difference

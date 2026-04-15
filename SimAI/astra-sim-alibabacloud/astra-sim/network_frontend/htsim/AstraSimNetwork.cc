@@ -54,6 +54,14 @@ static bool g_simulation_done = false;
 static int g_finished_count = 0;
 static int g_total_nodes = 0;
 
+// Per-pass timing: filled via on_pass_end_hook, read in stats output.
+static std::vector<double> g_pass_end_ms;
+void (*on_pass_end_hook)(int) = nullptr;
+// Per-rank pass-end hook: called by Workload.cc from every rank once that rank
+// finishes a pass. MoEReconfigManager uses this to close pass P's traffic
+// matrix only after all ranks have reported pass P done.
+void (*on_rank_pass_end_hook)(int rank, int pass) = nullptr;
+
 // ======== ASTRASimNetwork class (same interface as ns3 version) ========
 class ASTRASimNetwork : public AstraSim::AstraNetworkAPI {
 private:
@@ -69,14 +77,7 @@ public:
 
   int sim_finish() {
     cout << "[htsim] sim_finish called by node " << rank << endl;
-    for (auto it = nodeHash.begin(); it != nodeHash.end(); it++) {
-      pair<int, int> p = it->first;
-      if (p.second == 0) {
-        cout << "All data sent from node " << p.first << " is " << it->second << "\n";
-      } else {
-        cout << "All data received by node " << p.first << " is " << it->second << "\n";
-      }
-    }
+    // Per-node "All data sent/received" dump disabled by user request.
     g_simulation_done = true;
     return 0;
   }
@@ -215,6 +216,7 @@ struct user_param {
   int expert_topk;     // MoE top-k routing (0=uniform, no hotspot)
   double expert_skew;  // Zipf skew (1.0=moderate, 2.0=strong)
   int expert_seed;     // random seed for expert routing
+  int moe_volatility;  // MoE hotspot bucket size: every N layers share one distribution (default 1)
   int reconf_top_n;    // skip reconfig if top-N pairs already connected (0=always reconfig)
 
   user_param() {
@@ -237,6 +239,7 @@ struct user_param {
     expert_topk = 0;
     expert_skew = 1.0;
     expert_seed = 42;
+    moe_volatility = 1;
     reconf_top_n = 0;
   }
 };
@@ -262,6 +265,7 @@ static void print_usage() {
   cout << "  --expert_topk N         MoE top-k routing, 0=uniform (default: 0)" << endl;
   cout << "  --expert_skew F         Zipf skew for expert hotspot (default: 1.0)" << endl;
   cout << "  --expert_seed N         Random seed for expert routing (default: 42)" << endl;
+  cout << "  --moe_volatility N      MoE hotspot bucket size — every N layers share one distribution (default: 1)" << endl;
   cout << "  --reconf_top_n N        Skip reconfig if top-N pairs already connected (default: 0=always reconfig, mixnet only)" << endl;
 }
 
@@ -286,6 +290,7 @@ static int parse_params(int argc, char* argv[], struct user_param* params) {
     {"expert_topk",   required_argument, 0, 'K'},
     {"expert_skew",   required_argument, 0, 'S'},
     {"expert_seed",   required_argument, 0, 'D'},
+    {"moe_volatility",required_argument, 0, 'V'},
     {"reconf_top_n",  required_argument, 0, 'n'},
     {"help",          no_argument,       0, 'h'},
     {0, 0, 0, 0}
@@ -313,6 +318,7 @@ static int parse_params(int argc, char* argv[], struct user_param* params) {
       case 'K': params->expert_topk = stoi(optarg); break;
       case 'S': params->expert_skew = stod(optarg); break;
       case 'D': params->expert_seed = stoi(optarg); break;
+      case 'V': params->moe_volatility = stoi(optarg); break;
       case 'n': params->reconf_top_n = stoi(optarg); break;
       case 'h': print_usage(); return 1;
       default:  print_usage(); return 1;
@@ -409,7 +415,8 @@ int main(int argc, char *argv[]) {
   if (params.expert_topk > 0) {
     cout << "Expert hotspot: topk=" << params.expert_topk
          << " skew=" << params.expert_skew
-         << " seed=" << params.expert_seed << endl;
+         << " seed=" << params.expert_seed
+         << " volatility=" << params.moe_volatility << endl;
   }
   cout << "==========================" << endl;
 
@@ -420,12 +427,26 @@ int main(int argc, char *argv[]) {
   g_expert_topk = params.expert_topk;
   g_expert_skew = params.expert_skew;
   g_expert_seed = params.expert_seed;
+  g_moe_volatility = params.moe_volatility;
   g_reconf_top_n = params.reconf_top_n;
 
   // 1. Create htsim EventList
   EventList eventlist;
   eventlist.setEndtime(timeFromSec(2000000));
   g_eventlist = &eventlist;
+
+  // Register per-pass timing hook (called by Workload.cc at each pass_counter++)
+  on_pass_end_hook = [](int pass_idx) {
+    if (g_eventlist) g_pass_end_ms.push_back(timeAsMs(g_eventlist->now()));
+  };
+  // Register per-rank pass-end hook. The manager counts how many ranks have
+  // reported completion of pass P; once all of them do, pass P's block_tm is
+  // closed and promoted to last_block_tm for the next pass's prediction.
+  on_rank_pass_end_hook = [](int rank, int pass) {
+    if (g_mixnet_topo == nullptr) return;  // only needed for mixnet topology
+    int region_size = g_mixnet_topo->region_size;
+    g_moe_reconfig_mgr.on_rank_pass_end(rank, pass, g_total_gpus, region_size);
+  };
 
   // 2. Compute machine count and FatTree K parameter
   int num_machines = gpu_num / params.gpus_per_server;
@@ -531,6 +552,10 @@ int main(int argc, char *argv[]) {
         timeFromUs((double)params.reconf_delay_us), eventlist);
     g_topomanager = _topomanager_storage;
     cout << "[htsim] MixnetTopoManager created" << endl;
+    // Enable dead-OCS-route self-heal: on every RTO, check if this flow's route
+    // crosses a dead queue and reroute to ECS. Backstop for finish_reconf-based
+    // scanning when timing windows miss flows.
+    TcpSrc::on_rtx_stuck = &reroute_flow_if_dead;
   }
 
   // 6. Initialize port numbers
@@ -635,10 +660,8 @@ int main(int argc, char *argv[]) {
   cout << "NVLink flows:  " << g_flow_count_nvlink << " (" << g_flow_bytes_nvlink << " bytes)" << endl;
   if (g_topo_type == TOPO_MIXNET) {
     cout << "Deferred flows (reconf): " << g_flow_count_deferred << endl;
-    cout << "Reconfigs triggered (cold): " << g_moe_reconfig_mgr.reconfig_triggered << endl;
-    cout << "Reconfigs proactive: " << g_moe_reconfig_mgr.reconfig_proactive << endl;
-    cout << "Reconfigs hidden (0 delay): " << g_moe_reconfig_mgr.reconfig_hidden << endl;
-    cout << "Reconfigs skipped: " << g_moe_reconfig_mgr.reconfig_skipped << endl;
+    cout << "Reconfigs triggered: " << g_moe_reconfig_mgr.reconfig_triggered << endl;
+    cout << "Reconfigs skipped:   " << g_moe_reconfig_mgr.reconfig_skipped << endl;
   }
   uint64_t total_flows = g_flow_count_ocs + g_flow_count_ecs + g_flow_count_nvlink;
 
@@ -702,10 +725,8 @@ int main(int argc, char *argv[]) {
           << (g_flow_bytes_nvlink / 1048576.0) << " MB)" << endl;
     if (g_topo_type == TOPO_MIXNET) {
       stats << "Deferred flows (reconf): " << g_flow_count_deferred << endl;
-      stats << "Reconfigs triggered (cold): " << g_moe_reconfig_mgr.reconfig_triggered << endl;
-      stats << "Reconfigs proactive: " << g_moe_reconfig_mgr.reconfig_proactive << endl;
-      stats << "Reconfigs hidden (0 delay): " << g_moe_reconfig_mgr.reconfig_hidden << endl;
-      stats << "Reconfigs skipped: " << g_moe_reconfig_mgr.reconfig_skipped << endl;
+      stats << "Reconfigs triggered: " << g_moe_reconfig_mgr.reconfig_triggered << endl;
+      stats << "Reconfigs skipped:   " << g_moe_reconfig_mgr.reconfig_skipped << endl;
     }
     if (total_flows > 0) {
       stats << endl;
@@ -736,6 +757,37 @@ int main(int argc, char *argv[]) {
       }
     }
 
+    // Per-ComType traffic breakdown
+    {
+      uint64_t total_ct_bytes = 0, total_ct_flows = 0;
+      for (int i = 0; i < G_COMTYPE_N; i++) {
+        total_ct_bytes += g_bytes_by_comtype[i];
+        total_ct_flows += g_flows_by_comtype[i];
+      }
+      stats << endl;
+      stats << "======== Traffic by Collective Type ========" << endl;
+      for (int i = 0; i < G_COMTYPE_N; i++) {
+        if (g_flows_by_comtype[i] == 0 && g_bytes_by_comtype[i] == 0) continue;
+        double mb = g_bytes_by_comtype[i] / 1048576.0;
+        double pct = (total_ct_bytes > 0) ? (100.0 * g_bytes_by_comtype[i] / total_ct_bytes) : 0.0;
+        stats << "  " << comtype_name(i)
+              << ": flows=" << g_flows_by_comtype[i]
+              << " bytes=" << g_bytes_by_comtype[i]
+              << " (" << mb << " MB, " << pct << "%)" << endl;
+      }
+      cout << endl;
+      cout << "======== Traffic by Collective Type ========" << endl;
+      for (int i = 0; i < G_COMTYPE_N; i++) {
+        if (g_flows_by_comtype[i] == 0 && g_bytes_by_comtype[i] == 0) continue;
+        double mb = g_bytes_by_comtype[i] / 1048576.0;
+        double pct = (total_ct_bytes > 0) ? (100.0 * g_bytes_by_comtype[i] / total_ct_bytes) : 0.0;
+        cout << "  " << comtype_name(i)
+             << ": flows=" << g_flows_by_comtype[i]
+             << " bytes=" << g_bytes_by_comtype[i]
+             << " (" << mb << " MB, " << pct << "%)" << endl;
+      }
+    }
+
     stats << endl;
     stats << "======== Retransmission Statistics ========" << endl;
     stats << "RTO: " << params.rto_ms << " ms" << endl;
@@ -748,6 +800,25 @@ int main(int argc, char *argv[]) {
     stats << "======== Timing ========" << endl;
     stats << "Total events: " << event_count << endl;
     stats << "Final sim time: " << timeAsMs(eventlist.now()) << " ms" << endl;
+    if (!g_pass_end_ms.empty()) {
+      stats << endl;
+      stats << "======== Per-Pass Timing ========" << endl;
+      double prev = 0.0;
+      double sum = 0.0;
+      double minv = 1e18, maxv = -1e18;
+      for (size_t i = 0; i < g_pass_end_ms.size(); i++) {
+        double dur = g_pass_end_ms[i] - prev;
+        stats << "Pass " << (i + 1) << ": " << dur << " ms (end "
+              << g_pass_end_ms[i] << " ms)" << endl;
+        sum += dur;
+        if (dur < minv) minv = dur;
+        if (dur > maxv) maxv = dur;
+        prev = g_pass_end_ms[i];
+      }
+      double avg = sum / g_pass_end_ms.size();
+      stats << "Avg per pass: " << avg << " ms  (min " << minv
+            << ", max " << maxv << ")" << endl;
+    }
     stats << endl;
     stats << "Log directory: " << log_dir << endl;
     stats.close();

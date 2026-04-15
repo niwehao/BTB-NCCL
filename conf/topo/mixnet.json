@@ -5,10 +5,11 @@
     "queuesize": 8,
     "alpha": 6,
     "reconf_delay": 10,
+    "reconf_top_n": 4,
     "ecs_only": false
   },
   "simulation": {
-    "iterations": 1,
+    "iterations": 5,
     "rto_ms": 1
   }
 }

@@ -28,6 +28,7 @@ using namespace std;
 extern int g_expert_topk;
 extern double g_expert_skew;
 extern int g_expert_seed;
+extern int g_moe_volatility;  // every N layers share the same hotspot distribution (default 1)
 
 namespace MockNccl {
   MockNcclGroup::MockNcclGroup(int _ngpus,int _gpus_per_nodes,int _TP_size,int _DP_size,int _PP_size,int _EP_size,int _DP_EP_size,std::vector<int>_NVSwitch,GPUType _gpu_type):g_flow_id(0),gpu_type(_gpu_type){
@@ -398,6 +399,18 @@ namespace MockNccl {
     }
   }
 
+  // Lazily assign a 0-based index to each distinct a2a layer_num in the order
+  // the scheduler first sees it. All callers (all ranks, all EP groups) go
+  // through the same GlobalGroup singleton and are serialized by the htsim
+  // event loop, so no lock is needed.
+  int MockNcclGroup::get_or_assign_a2a_idx(int layer_num) {
+    auto it = a2a_layer_to_a2a_idx.find(layer_num);
+    if (it != a2a_layer_to_a2a_idx.end()) return it->second;
+    int idx = (int)a2a_layer_to_a2a_idx.size();
+    a2a_layer_to_a2a_idx[layer_num] = idx;
+    return idx;
+  }
+
   std::map<int,std::shared_ptr<FlowModels>> MockNcclGroup::genAlltoAllFlowModels(GroupType type, int rank, uint64_t data_size, int layer_num, int loopstate, int pass_counter){
     FlowModels result = {};
     std::map<int,FlowModels>rank2flowmodels;
@@ -446,10 +459,23 @@ namespace MockNccl {
       uint64_t per_src_budget = chunksize_hotspot * (nranks - 1);
 
       for (int i = 0; i < (int)gp_info.Ranks.size(); i++) {
-        // Seed depends on layer and src rank only (NOT pass_counter),
+        // Seed depends on MoE block bucket and src rank only (NOT pass_counter),
         // so the same layer has identical expert distribution across iterations.
+        // `g_moe_volatility` is now interpreted at MoE-block granularity:
+        //   1  -> every MoE block gets a fresh Zipf shuffle (dispatch+combine
+        //         of the SAME block still share, because they map to the same
+        //         block_idx via a2a_idx/2)
+        //   N  -> every N consecutive MoE blocks share one shuffle
+        //   +∞ -> all blocks share one shuffle
+        // Note: this replaces the old `layer_num / vol` formula, which was
+        // coupled to workload layout (it assumed adjacent a2a layers were
+        // layer_num+1 apart). The block-based formula is layout-agnostic.
+        int vol = g_moe_volatility > 0 ? g_moe_volatility : 1;
+        int a2a_idx   = get_or_assign_a2a_idx(layer_num);   // 0,1,2,3,...
+        int block_idx = a2a_idx / 2;                        // dispatch+combine paired
+        uint32_t bucket = (uint32_t)(block_idx / vol);
         uint32_t seed = (uint32_t)g_expert_seed
-                      ^ ((uint32_t)layer_num * 9973u)
+                      ^ (bucket * 9973u)
                       ^ ((uint32_t)i * 1013u);
         std::mt19937 rng(seed);
 

@@ -1,0 +1,19 @@
+{
+  "model": {
+    "name": "DeepSeek-671B",
+    "model_size": "deepseek-671B",
+    "world_size": 128,
+    "tp_degree": 8,
+    "pp_degree": 2,
+    "dp_degree": 1,
+    "ep_degree": 8,
+    "gpus_per_server": 8,
+    "phase": "decode",
+    "seq_length": 1024,
+    "micro_batch": 1,
+    "expert_topk": 8,
+    "expert_skew": 1.0,
+    "expert_seed": 42,
+    "moe_volatility": 4
+  }
+}

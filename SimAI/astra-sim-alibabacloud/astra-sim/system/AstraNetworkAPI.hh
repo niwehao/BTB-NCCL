@@ -40,6 +40,8 @@ struct ncclFlowTag {
   bool nvls_on;
   int com_type;  // ComType enum: 0=None,1=Reduce_Scatter,2=All_Gather,3=All_Reduce,4=All_to_All,5=All_Reduce_All_to_All,6=All_Reduce_NVLS
   int layer_num;  // workload layer number (0-based index in workload file)
+  int pass_counter;  // workload pass index (iteration) that this flow belongs to
+  int loop_state;    // Workload::LoopState at flow creation (0=Forward_Pass, 1=Weight_Gradient, 2=Input_Gradient, ...)
   ncclFlowTag():
     channel_id(-1),
     chunk_id(-1),
@@ -52,7 +54,9 @@ struct ncclFlowTag {
     tag_id(-1),
     nvls_on(false),
     com_type(-1),
-    layer_num(-1){};
+    layer_num(-1),
+    pass_counter(-1),
+    loop_state(-1){};
   ncclFlowTag(
       int _channel_id,
       int _chunk_id,

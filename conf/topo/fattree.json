@@ -5,7 +5,7 @@
     "queuesize": 8
   },
   "simulation": {
-    "iterations": 1,
+    "iterations": 5,
     "rto_ms": 1
   }
 }

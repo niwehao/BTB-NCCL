@@ -133,9 +133,15 @@ namespace MockNccl {
     int g_flow_id;
     GPUType gpu_type;
     std::map<std::string,int> FlowName2nums;
-    std::map<std::string ,std::map<int,std::shared_ptr<FlowModels> >> flow_models; 
-    std::map<std::string ,struct ncclInfo*> nccl_infos;  
+    std::map<std::string ,std::map<int,std::shared_ptr<FlowModels> >> flow_models;
+    std::map<std::string ,struct ncclInfo*> nccl_infos;
     std::shared_ptr<void> getFlowModels(GroupType type , int rank, AstraSim::ComType op,uint64_t data_size,int layer_num,State loopstate,int pass_counter=0);
+    // Maps a workload layer_num to its 0-based index among All-to-All layers
+    // (first a2a layer seen → 0, second → 1, etc.). Populated lazily inside
+    // genAlltoAllFlowModels. Used to compute MoE block_idx = a2a_idx / 2,
+    // which drives the volatility bucket independently of workload layout.
+    std::map<int, int> a2a_layer_to_a2a_idx;
+    int get_or_assign_a2a_idx(int layer_num);
    private:
     std::map<int,std::shared_ptr<FlowModels>> genFlowModels(GroupType type , int rank, AstraSim::ComType op,uint64_t data_size,int layer_num=0,int loopstate=0,int pass_counter=0);
     std::map<int,std::shared_ptr<FlowModels>> genReduceScatterFlowModels(GroupType type , int rank, uint64_t data_size);

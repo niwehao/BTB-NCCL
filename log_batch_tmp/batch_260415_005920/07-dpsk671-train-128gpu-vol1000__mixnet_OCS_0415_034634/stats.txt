@@ -1,0 +1,63 @@
+======== Run Configuration ========
+Topology: mixnet
+GPUs: 128
+TP: 8  PP: 2  EP: 8  DP: 1
+Iterations: 5
+Link speed: 100000 Mbps
+Machines: 16
+Network mode: OCS+ECS mixnet
+Alpha (OCS circuits): 6
+ECS link speed: 200000 Mbps
+Reconf top-N: 4
+Queue type (ECS): LOSSLESS_INPUT_ECN
+Queue type (OCS): ECN
+
+======== Flow Statistics ========
+OCS flows:    60928 (119035440864 bytes, 113521 MB)
+Network flows: 15808 (3382018297504 bytes, 3.22534e+06 MB)
+NVLink flows:  4551680 (18435426222080 bytes, 1.75814e+07 MB)
+Deferred flows (reconf): 56
+Reconfigs triggered: 1
+Reconfigs skipped:   15
+
+Flow count ratio:
+  OCS:     1.31639%
+  Network: 0.341542%
+  NVLink:  98.3421%
+
+Bytes ratio:
+  OCS:     0.542637%
+  Network: 15.4173%
+  NVLink:  84.04%
+
+Cross-machine bytes ratio (OCS vs ECS):
+  OCS: 3.39999%
+  ECS: 96.6%
+
+======== Traffic by Collective Type ========
+  None: flows=576 bytes=10871635968 (10368 MB, 0.0495595%)
+  ReduceScatter: flows=1438080 bytes=6741452390400 (6.42915e+06 MB, 30.7316%)
+  AllGather: flows=2329600 bytes=6753086341120 (6.44024e+06 MB, 30.7846%)
+  AllReduce: flows=788480 bytes=8300053135360 (7.91555e+06 MB, 37.8366%)
+  AllToAll: flows=71736 bytes=131081001440 (125009 MB, 0.597546%)
+
+======== Retransmission Statistics ========
+RTO: 1 ms
+Total packets sent: 3502558120500
+Total retransmissions: 190
+Retransmission rate: 5.42461e-09%
+TCP flows tracked: 76737
+
+======== Timing ========
+Total events: 22685775776
+Final sim time: 11923.7 ms
+
+======== Per-Pass Timing ========
+Pass 1: 90.0405 ms (end 90.0405 ms)
+Pass 2: 2368.7 ms (end 2458.74 ms)
+Pass 3: 2345.04 ms (end 4803.79 ms)
+Pass 4: 2287.12 ms (end 7090.91 ms)
+Pass 5: 2644.2 ms (end 9735.11 ms)
+Avg per pass: 1947.02 ms  (min 90.0405, max 2644.2)
+
+Log directory: /home/weihaoni/BTB-NCCL/log/mixnet_OCS_0415_034634

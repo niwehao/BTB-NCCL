@@ -12,6 +12,14 @@ LICENSE file in the root directory of this source tree.
 extern uint64_t g_total_tcp_flows;
 extern uint64_t g_total_tcp_flows_created;
 
+// Per-pass timing hook (defined in AstraSimNetwork.cc). Declared in the global
+// namespace so the extern redeclarations inside AstraSim:: methods resolve to it.
+extern void (*on_pass_end_hook)(int);
+// Per-rank pass-end hook (defined in AstraSimNetwork.cc). Fires for EVERY rank,
+// not just rank 0. Used by MoEReconfigManager to drain pass P's traffic matrix
+// only after all ranks have finished pass P (avoids close_block race).
+extern void (*on_rank_pass_end_hook)(int rank, int pass);
+
 namespace AstraSim {
 
 // Print progress bar: layer progress on bar, flow stats appended
@@ -714,6 +722,12 @@ void Workload::iterate_distributed_inference() {
       index = 0;
       pass_counter++;
       if (generator->id == 0) fprintf(stderr, "\n");
+      // Per-pass timing hook: registered by the network frontend to record the
+      // eventlist timestamp at the end of each pass for later reporting in stats.
+      if (generator->id == 0 && ::on_pass_end_hook) ::on_pass_end_hook(pass_counter);
+      // Per-rank pass-end hook: fires for every rank so MoEReconfigManager
+      // can close pass P's block_tm only when ALL ranks have completed pass P.
+      if (::on_rank_pass_end_hook) ::on_rank_pass_end_hook(generator->id, pass_counter - 1);
     }
     generator->register_event(this, EventType::General, NULL, 1);
     return;
@@ -892,6 +906,10 @@ void Workload::iterate_hybrid_parallel_Transformer() {
                   << " finished at time: " << Sys::boostedTick() << std::endl;
       }
       pass_counter++;
+      {
+        if (generator->id == 0 && ::on_pass_end_hook) ::on_pass_end_hook(pass_counter);
+        if (::on_rank_pass_end_hook) ::on_rank_pass_end_hook(generator->id, pass_counter - 1);
+      }
       if (pp_size > 1) {
         current_state = LoopState::PP_Backward_Send_Recv;
         generator->register_event(this, EventType::General, NULL, 1);
@@ -1028,6 +1046,10 @@ void Workload::iterate_hybrid_parallel_Transformer_fwd_in_bckwd() {
                   << " finished at time: " << Sys::boostedTick() << std::endl;
       }
       pass_counter++;
+      {
+        if (generator->id == 0 && ::on_pass_end_hook) ::on_pass_end_hook(pass_counter);
+        if (::on_rank_pass_end_hook) ::on_rank_pass_end_hook(generator->id, pass_counter - 1);
+      }
       if (pp_size > 1) {
         current_state = LoopState::PP_Backward_Send_Recv;
         generator->register_event(this, EventType::General, NULL, 1);

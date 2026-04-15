@@ -129,14 +129,12 @@ void RegionalTopoManager::doNextEvent()
 
 void RegionalTopoManager::start_reconf()
 {
-  // Compute the conn matrix based on traffic matrix at the beginning
+  // Synchronous reconfig: always pause in-region a2a flows during the reconf
+  // window; finish_reconf() will resume them. The entry.h layer also defers any
+  // new a2a flows that arrive while reconfig is in progress, so typically there
+  // are no in-flight a2a flows at this point. The pause is defensive.
   non_empty_queues = 0;
-  if (!proactive_mode) {
-    // Normal mode: pause existing TCP flows during reconfig
-    set_regional_tcp_pause();
-  }
-  // In proactive mode, skip TCP pause — existing flows continue on old bandwidth,
-  // new conn matrix takes effect for new flows after finish_reconf()
+  set_regional_tcp_pause();
   _do_reconf();
 }
 
@@ -217,6 +215,65 @@ void RegionalTopoManager::finish_reconf()
     }
   }
   resume_regional_tcp_flows();
+  // After bandwidth update: any in-progress flow whose route now crosses a dead
+  // (bitrate=0) OCS queue is doomed (queue is permanently PAUSED, packets can't
+  // drain). Reroute those flows to ECS so they don't RTO-spiral.
+  reroute_dead_flows();
+}
+
+void RegionalTopoManager::reroute_dead_flows()
+{
+  if (demandrecorder == nullptr || demandrecorder->rtx_scanner == nullptr) return;
+  int rerouted = 0;
+  list<TcpSrc*>::iterator i = demandrecorder->rtx_scanner->_tcps.begin();
+  for (; i != demandrecorder->rtx_scanner->_tcps.end(); ++i) {
+    TcpSrc *tcp = *i;
+    if (tcp == nullptr) continue;
+    if (tcp->_finished) continue;
+    if (tcp->is_elec) continue;                   // already on ECS fabric
+    // Must be confined to this region (OCS routes only exist intra-region)
+    int gpn = topo->gpus_per_node;
+    if (!(tcp->_flow_src >= gpn * start_node && tcp->_flow_src < gpn * end_node &&
+          tcp->_flow_dst >= gpn * start_node && tcp->_flow_dst < gpn * end_node))
+      continue;
+    if (tcp->_route == nullptr) continue;
+
+    // Does any hop of its route have _bitrate == 0 ?
+    bool dead = false;
+    for (Route::const_iterator it = tcp->_route->begin(); it != tcp->_route->end(); ++it) {
+      Queue *q = dynamic_cast<Queue*>(*it);
+      if (q != nullptr && q->_bitrate == 0) { dead = true; break; }
+    }
+    if (!dead) continue;
+
+    // Get fresh ECS paths and swap.
+    vector<const Route*>* fwd = topo->get_eps_paths(tcp->_flow_src, tcp->_flow_dst);
+    vector<const Route*>* bck = topo->get_eps_paths(tcp->_flow_dst, tcp->_flow_src);
+    if (fwd == nullptr || fwd->empty() || bck == nullptr || bck->empty()) {
+      std::cout << "[REROUTE_ECS] WARN no ECS path for src=" << tcp->_flow_src
+                << " dst=" << tcp->_flow_dst << std::endl;
+      continue;
+    }
+    // Mirror entry.h::SendFlow: copy the raw path, append the Sink/Src endpoints,
+    // and cross-wire reverses. Must NOT mutate the topology's cached routes.
+    Route *newfwd  = new Route(*(fwd->at(rand() % fwd->size())));
+    Route *newback = new Route(*(bck->at(rand() % bck->size())));
+    newfwd->push_back(tcp->_sink);  // last hop delivers to the sink
+    newback->push_back(tcp);        // reverse path ends at the source
+    newfwd->set_reverse(newback);
+    newback->set_reverse(newfwd);
+
+    tcp->reroute_to(newfwd, newback);
+    tcp->is_elec = true;  // future reconfigs will skip it (is_in_region returns false)
+    rerouted++;
+    if (rerouted <= 10) {
+      std::cout << "[REROUTE_ECS] src=" << tcp->_flow_src << " dst=" << tcp->_flow_dst
+                << " switched dead OCS -> ECS (region=" << region_id << ")" << std::endl;
+    }
+  }
+  if (rerouted > 0) {
+    std::cout << "[REROUTE_ECS] region=" << region_id << " total_rerouted=" << rerouted << std::endl;
+  }
 }
 
 void RegionalTopoManager::set_regional_queues_pause_recved()

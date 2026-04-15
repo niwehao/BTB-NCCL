@@ -66,6 +66,7 @@ public:
   void set_regional_tcp_pause();
   void update_regional_route();
   void resume_regional_tcp_flows();
+  void reroute_dead_flows();   // after reconfig: flows whose route crosses a dead OCS queue get switched to ECS
   void normalize_tm(Matrix2D<double> & normal_tm);
   bool is_in_region(TcpSrc* tcpsrc) const;
   std::vector<std::vector<int>> regional_topo_reconfig();
@@ -86,7 +87,7 @@ public:
   All2AllTrafficRecorder * demandrecorder;
   uint64_t non_empty_queues;
   std::vector<std::vector<int>> reconfig_conn_matrix;  // Store the conn matrix computed in start_reconf
-  bool proactive_mode = false;  // When true, skip TCP pause during reconfig (proactive pre-reconfig)
+  // (proactive_mode field removed — reconfig is now synchronous; see start_reconf)
 };
 
 class MixnetTopoManager {

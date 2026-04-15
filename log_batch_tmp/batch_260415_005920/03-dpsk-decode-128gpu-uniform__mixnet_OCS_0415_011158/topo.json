@@ -1,0 +1,15 @@
+{
+  "topology": {
+    "type": "mixnet",
+    "speed": 100000,
+    "queuesize": 8,
+    "alpha": 6,
+    "reconf_delay": 10,
+    "reconf_top_n": 4,
+    "ecs_only": false
+  },
+  "simulation": {
+    "iterations": 5,
+    "rto_ms": 1
+  }
+}

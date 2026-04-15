@@ -427,6 +427,7 @@ class TcpSrc : public PacketSink, public EventSource {
     virtual void receivePacket(Packet& pkt);
 
     void replace_route(const Route* newroute);
+    void reroute_to(const Route* newfwd, const Route* newback);
 
     void set_flowsize(uint64_t flow_size_in_bytes);
 
@@ -468,6 +469,11 @@ class TcpSrc : public PacketSink, public EventSource {
 
     int32_t _app_limited;
     
+    // Optional hook called each time an RTO fires on a flow; returns true if the
+    // callback rerouted the flow (caller can use this to avoid/reset backoff).
+    // Set by the topology layer (e.g. mixnet) to plug in dead-OCS-route rescue.
+    static bool (*on_rtx_stuck)(TcpSrc*);
+
     static bool tcp_flow_paused;
     bool tcp_flow_paused_in_region = false;
     bool tcp_has_pending_send = false;

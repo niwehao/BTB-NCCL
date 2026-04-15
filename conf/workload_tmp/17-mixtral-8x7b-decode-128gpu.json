@@ -1,0 +1,20 @@
+{
+  "_comment": "Mixtral-8x7B inference (decode). Uses AICB native mixtral-8x7B preset; all MoE hotspot/volatility params tunable in .model.*",
+  "model": {
+    "name": "Mixtral-8x7B",
+    "model_size": "mixtral-8x7B",
+     "world_size": 128,
+    "tp_degree": 4,
+    "pp_degree": 4,
+    "dp_degree": 1,
+    "ep_degree": 8,
+    "gpus_per_server": 8,
+    "phase": "decode",
+    "seq_length": 4096,
+    "micro_batch": 8,
+    "expert_topk": 2,
+    "expert_skew": 1.0,
+    "expert_seed": 42,
+    "moe_volatility": 2
+  }
+}

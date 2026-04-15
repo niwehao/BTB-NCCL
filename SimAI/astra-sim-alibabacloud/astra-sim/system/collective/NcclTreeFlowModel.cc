@@ -23,6 +23,7 @@
 #include "astra-sim/system/PacketBundle.hh"
 #include "astra-sim/system/RecvPacketEventHadndlerData.hh"
 #include "astra-sim/system/MockNcclLog.h"
+#include "astra-sim/workload/Workload.hh"
 #ifdef PHY_RDMA
 #include "astra-sim/system/SimAiFlowModelRdma.hh"
 extern FlowPhyRdma flow_rdma; 
@@ -615,6 +616,10 @@ bool NcclTreeFlowModel::ready(int channel_id, int flow_id) {
     snd_req.flowTag.nvls_on = false;
   snd_req.flowTag.com_type = static_cast<int>(this->comType);
   snd_req.flowTag.layer_num = layer_num;
+  if (stream && stream->owner && stream->owner->workload) {
+    snd_req.flowTag.pass_counter = stream->owner->workload->pass_counter;
+    snd_req.flowTag.loop_state   = static_cast<int>(stream->owner->workload->current_state);
+  }
   SendPacketEventHandlerData* send_ehd = new SendPacketEventHandlerData(
       stream,
       id,
@@ -749,6 +754,10 @@ bool NcclTreeFlowModel::phy_ready(int channel_id,int flow_id) {
     snd_req.flowTag.nvls_on = false;
   snd_req.flowTag.com_type = static_cast<int>(this->comType);
   snd_req.flowTag.layer_num = layer_num;
+  if (stream && stream->owner && stream->owner->workload) {
+    snd_req.flowTag.pass_counter = stream->owner->workload->pass_counter;
+    snd_req.flowTag.loop_state   = static_cast<int>(stream->owner->workload->current_state);
+  }
   SendPacketEventHandlerData* send_ehd = new SendPacketEventHandlerData(
       stream,
       id,

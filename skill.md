@@ -3,7 +3,8 @@
 ## cache
 
 ./run.sh conf/topo/os_fattree.json conf/topo/mixnet.json conf/topo/fattree.json conf/workload/mistral-8-7B-train.json
-./run.sh conf/topo/mixnet.json conf/topo/os_fattree.json conf/topo/fattree.json conf/workload/deepseek-671b-decode.json
+./run.sh  conf/topo/mixnet.json conf/topo/fattree.json conf/workload/mistral-8-7B-train.json
+./run.sh  conf/topo/fattree-10iter.json deepseek-671b-decode-hotspot-ep8-tp4.json
 
 ## 文件结构
 
@@ -378,3 +379,24 @@ bash scripts/megatron_workload_with_aiob.sh \
   --seq_length 4096 --micro_batch 1 --global_batch 32 \
   --moe_enable
 ```
+FCT = **Flow Completion Time**，即流完成时间。
+
+看格式：
+
+```
+FCT src dst flow_size start_time end_time  slowdown
+FCT 8   24  283934720 269.825    2393.53   8.41833
+```
+
+| 列 | 含义 | 示例 |
+|----|------|------|
+| src | 源 GPU ID | 8 |
+| dst | 目标 GPU ID | 24 |
+| flow_size | 流大小 (bytes) | 283934720 (~270MB) |
+| start_time | 开始时间 (ms) | 269.825 |
+| end_time | 完成时间 (ms) | 2393.53 |
+| slowdown | 减速比 = 实际时间 / 理论最优时间 | 8.42x |
+
+slowdown 反映了网络拥塞程度——`FCT 87 103` 的 slowdown 高达 86x，说明这对 GPU 之间的通信严重拥塞；而 `FCT 8 24` 只有 8.4x，相对好很多。
+
+这些数据写在 `g_fct_output`，由 TCP 流完成时在 `tcp.cpp` 的 `receivePacket` 里输出。
