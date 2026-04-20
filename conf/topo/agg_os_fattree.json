@@ -2,8 +2,9 @@
   "topology": {
     "type": "agg_os_fattree",
     "speed": 100000,
-    "queuesize": 8,
-    "os_ratio": 2
+    "queuesize": 200,
+    "os_ratio": 2,
+    "ecs_qt": "lossless_input_ecn"
   },
   "simulation": {
     "iterations": 1,

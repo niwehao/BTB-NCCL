@@ -1,0 +1,74 @@
+======== Run Configuration ========
+Topology: mixnet
+GPUs: 64
+TP: 8  PP: 1  EP: 8  DP: 8
+Iterations: 5
+Link speed: 100000 Mbps
+Machines: 8
+Network mode: OCS+ECS mixnet
+Alpha (OCS circuits): 6
+ECS link speed: 200000 Mbps
+Reconf top-N: 4
+Queue type (ECS): ECN
+Queue type (OCS): ECN
+
+======== Flow Statistics ========
+OCS flows:    27648 (885392073984 bytes, 844376 MB)
+Network flows: 32832 (439373579136 bytes, 419019 MB)
+NVLink flows:  824320 (12610500689920 bytes, 1.20263e+07 MB)
+Deferred flows (reconf): 56
+Reconfigs triggered: 1
+Reconfigs skipped:   15
+
+Flow count ratio:
+  OCS:     3.12477%
+  Network: 3.71067%
+  NVLink:  93.1646%
+
+Bytes ratio:
+  OCS:     6.35361%
+  Network: 3.15296%
+  NVLink:  90.4934%
+
+Cross-machine bytes ratio (OCS vs ECS):
+  OCS: 66.8339%
+  ECS: 33.1661%
+
+======== A2A Prediction Hit (OCS) - Per Pass ========
+  OCS share = a2a bytes routed over OCS / all cross-machine a2a bytes
+  pass=0 is cold (no prediction available); pass>=1 reflects prediction hit rate
+  pass=0: a2a_flows=7168 ocs=6144 ecs=1024 | bytes=200704MB ocs=172032MB ecs=28672MB | ocs_flow_share=85.7143% ocs_bytes_share=85.7143%  (cold: no prediction)
+  pass=1: a2a_flows=7168 ocs=5376 ecs=1792 | bytes=200704MB ocs=168086MB ecs=32618.1MB | ocs_flow_share=75% ocs_bytes_share=83.7482%
+  pass=2: a2a_flows=7168 ocs=5376 ecs=1792 | bytes=200704MB ocs=168086MB ecs=32618.1MB | ocs_flow_share=75% ocs_bytes_share=83.7482%
+  pass=3: a2a_flows=7168 ocs=5376 ecs=1792 | bytes=200704MB ocs=168086MB ecs=32618.1MB | ocs_flow_share=75% ocs_bytes_share=83.7482%
+  pass=4: a2a_flows=7168 ocs=5376 ecs=1792 | bytes=200704MB ocs=168086MB ecs=32618.1MB | ocs_flow_share=75% ocs_bytes_share=83.7482%
+  ----------------------------------------------------
+  Total: a2a_flows=35840 ocs=27648 ecs=8192 | bytes=1.00352e+06MB ocs=844376MB ecs=159144MB | ocs_flow_share=77.1429% ocs_bytes_share=84.1414%
+  Total (excl. pass 0): a2a_flows=28672 | bytes=802816MB | ocs_flow_share=75% ocs_bytes_share=83.7482%
+
+======== Traffic by Collective Type ========
+  ReduceScatter: flows=239680 bytes=6285452902400 (5.99428e+06 MB, 45.0992%)
+  AllGather: flows=322560 bytes=6449855856640 (6.15106e+06 MB, 46.2788%)
+  AllReduce: flows=286720 bytes=147690618880 (140849 MB, 1.0597%)
+  AllToAll: flows=35896 bytes=1053958320656 (1.00513e+06 MB, 7.56233%)
+
+======== Retransmission Statistics ========
+RTO: 1 ms
+Total packets sent: 1336252329000
+Total retransmissions: 733
+Retransmission rate: 5.48549e-08%
+TCP flows tracked: 60501
+
+======== Timing ========
+Total events: 3747730075
+Final sim time: 8076.64 ms
+
+======== Per-Pass Timing ========
+Pass 1: 1289.87 ms (end 1289.87 ms)
+Pass 2: 1617.21 ms (end 2907.07 ms)
+Pass 3: 1632.29 ms (end 4539.37 ms)
+Pass 4: 1620.93 ms (end 6160.29 ms)
+Pass 5: 1603.7 ms (end 7763.99 ms)
+Avg per pass: 1552.8 ms  (min 1289.87, max 1632.29)
+
+Log directory: /home/weihaoni/BTB-NCCL/log/mixnet_OCS_0419_225002

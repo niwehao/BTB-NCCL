@@ -71,6 +71,9 @@ enum TopoType {
   TOPO_AGG_OS_FATTREE, // Aggregated oversubscribed fat-tree
   TOPO_FC,           // Full circuit (all-to-all direct)
   TOPO_FLAT,         // Flat topology
+#ifdef PRENET_ENABLED
+  TOPO_PRENET,       // Prenet: predictor-driven OCS/ECS (isolated from mixnet)
+#endif
 };
 
 // ======== htsim global objects ========
@@ -136,6 +139,9 @@ void init_fct_output(const std::string& filename = "fct_output.txt") {
 
 // ======== CallbackEvent: bridges astra-sim void(*)(void*) to htsim EventSource ========
 class CallbackEvent : public EventSource {
+  //是个一次性的适配器,作用是把"C          
+  // 风格的函数指针回调"包装成 htsim EventList 能调度的   
+  // EventSource。      
 public:
   void (*_fun_ptr)(void*);
   void* _fun_arg;
@@ -151,7 +157,10 @@ public:
 
 void schedule_callback(simtime_picosec delay_ps, void (*fun_ptr)(void*), void* fun_arg) {
   CallbackEvent* ev = new CallbackEvent(*g_eventlist, fun_ptr, fun_arg);
-  g_eventlist->sourceIsPendingRel(*ev, delay_ps);
+  // g_eventlist 是 htsim 前端的全局事件循环指针,指向 main
+  //  栈上那个 EventList 对象 —— 它是整个仿真的"时钟总管 +
+  //  事件调度器"。
+  g_eventlist->sourceIsPendingRel(*ev, delay_ps);//把函数封装成一个事件,在 delay_ps 之后执行。注意这个事件会自己删除自己(见 CallbackEvent::doNextEvent),所以不需要外部管理生命周期。
 }
 
 // ======== Flow completion tracking (same logic as ns3/entry.h) ========
@@ -168,6 +177,16 @@ bool is_sending_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
   }
   return false;
 }
+// waiting_to_sent_callback 是一个全局计数器            
+//   map,专门追踪"一个逻辑 flow_id 下还剩几条底层 flow    
+//   没'发送完成'上报"。
+
+// 每条底层 flow 完成时:
+//     ├─ 累加字节数到 received_chunksize / sent_chunksize
+//     └─ 调 is_*_finished 问 "还有兄弟 flow 在跑吗?"
+//        ├─ 有 → 立刻 return,上层不知道                  
+//        └─ 没 → 擦计数器,拿累加的总字节数,notify_* 上报 
+//减到 0 才告诉上层 "这条逻辑 flow 整体发完了,可以调 sender,避免上层 Sys 收到 N 个完成通知
 
 bool is_receive_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
   int tag_id = flowTag.current_flow_id;
@@ -187,6 +206,13 @@ bool is_receive_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
   }
   return false;
 }
+// 这两个函数是 flow 完成后的最终上报点 ——
+//   htsim_flow_finish 在 is_*_finished 返回 true
+//   后调它们,把"一条逻辑 flow 整体完成"的事件转交给上层
+//    Sys。一个负责 receiver 侧(匹配 recv 请求),一个负责
+//    sender 侧(调 send 完成回调)。
+// handler是 flow 完成后的回调函数,在 is_*_finished 里被调用。上层 Sys 在发起 send/recv 时会把自己的回调函数和参数传下来,等 flow 真正完成时由 htsim 调用这个回调通知上层。
+// handler的注册在AstraSimNetwork::sim_send/sim_recv里,在 sentHash/expeRecvHash 里和 flowTag 绑定在一起,等 flow 完成时 htsim 从 sentHash/expeRecvHash 里找到对应的 handler 调用。
 
 // ======== notify callbacks (copied from ns3/entry.h, NS-3 independent) ========
 void notify_receiver_receive_data(int sender_node, int receiver_node,
@@ -242,6 +268,7 @@ void notify_receiver_receive_data(int sender_node, int receiver_node,
     }
   }
 }
+//
 
 void notify_sender_sending_finished(int sender_node, int receiver_node,
                                     uint64_t message_size, AstraSim::ncclFlowTag flowTag) {
@@ -290,6 +317,33 @@ struct HtsimFlowContext {
 };
 
 // Called when a htsim TCP flow completes (via application_callback)
+//这个函数是整条完成链的入口,前面讨论的 is_*_finished 和 notify_* 都是它里面调用的下游工具。三层关系:
+// 层次图                                      
+                                          
+//   每条底层 flow 完成         - TCP flow 完成:DCTCPSrc   和    - 同机 NVLink 定时完成                       
+//     ↓ 被 TCP 或 NVLink CallbackEvent 调              
+//   htsim_flow_finish(ctx)            ←                
+//   你现在选的函数(入口/驱动者)                        
+//     │                                     
+//     ├─ receiver 段:                                  
+//     │   ├─ received_chunksize[...] += flow_size      
+//   (累加字节)                                         
+//     │   ├─ is_receive_finished(...)                ← 
+//   前面讨论的:计数器-- 是否归零                
+//     │   │     └─ false → return(还有兄弟             
+//   flow,提前退出)                              
+//     │   └─ true → notify_receiver_receive_data(...)  
+//   ← 前面讨论的:匹配 expeRecvHash/recvHash,调 recv
+//   handler                                            
+//     │             
+//     └─ sender 段:                                    
+//         ├─ sent_chunksize[...] += flow_size   
+//         ├─ is_sending_finished(...)                ← 
+//   前面讨论的:计数器-- 是否归零                
+//         │     └─ false → return                      
+//         └─ true → notify_sender_sending_finished(...)
+//     ← 前面讨论的:匹配 sentHash,调 send handler  
+
 void htsim_flow_finish(void* ctx_ptr) {
   HtsimFlowContext* ctx = static_cast<HtsimFlowContext*>(ctx_ptr);
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
@@ -330,6 +384,11 @@ void htsim_flow_finish(void* ctx_ptr) {
 }
 
 // ======== Deferred send (for flows during reconfiguration) ========
+// 这段代码是 "OCS 重配期间把新 flow                
+//   暂存、等重配结束再发" 的基础设施。mixnet    
+//   的光路重配需要一段物理时间(reconf_delay_us),重配中 
+//   链路不通,落在窗口里的 flow 不能硬发,要 park 
+//   起来等重配完再 replay。四个部分各司其职:
 struct DeferredSendData {
   int src, dst;
   uint64_t count;
@@ -345,7 +404,11 @@ struct DeferredSendData {
 // bytes are double-counted. htsim is a single-threaded event-driven simulator,
 // so a plain static bool is sufficient as a re-entrancy guard.
 static bool g_replaying_deferred_flow = false;
-
+// 继承 EventSource,挂到 g_eventlist,触发时机 =       
+//   reconfig_end_time。和前面讨论过的 CallbackEvent
+//   属于同一套 "一次性事件" 模式(doNextEvent() 里  
+//   delete this 自毁),但它专门重放               
+//   SendFlow,不是通用回调。
 class DeferredSendEvent : public EventSource {
 public:
   DeferredSendData _data;
@@ -397,21 +460,25 @@ struct MoEReconfigManager {
   // ---- Block structure (discovered in pass 0 forward, then frozen) ----
   // Ordered list of a2a layer_nums as they appear in a single forward pass.
   // Two consecutive a2a layers = one MoE block (dispatch + combine).
-  std::vector<int> fwd_a2a_layer_order;          // sorted-as-seen, first pass only
-  std::set<int> fwd_a2a_layer_set;               // dedup helper
+  std::vector<int> fwd_a2a_layer_order;          // sorted-as-seen, first pass only,pass 0 forward 里所有 a2a 的 layer_num(去重+排序)  
+  std::set<int> fwd_a2a_layer_set;               // dedup helper 
   std::map<int,int> layer_to_block;              // layer_num → block_idx
   std::map<int,int> layer_pair_pos;              // layer_num → 0 (dispatch) / 1 (combine)
   bool structure_frozen = false;                 // true once we've seen pass >= 1
-
+// pass 0 forward 跑完后,按 layer_num 排序,相邻两个 
+//   a2a 成一个 block(第 1 个是 dispatch,第 2 个是      
+//   combine)。 
   // ---- Traffic matrices ----
   // Active accumulator: keyed by (pass_counter, layer_num, region_id)
-  std::map<std::tuple<int,int,int>, Matrix2D<double>*> layer_tm;
+  std::map<std::tuple<int,int,int>, Matrix2D<double>*> layer_tm;//实时累加   
   // Finalised block TMs: keyed by (pass_counter, block_idx, region_id)
-  std::map<std::tuple<int,int,int>, Matrix2D<double>*> block_tm;
+  std::map<std::tuple<int,int,int>, Matrix2D<double>*> block_tm;///pass 完成后 dispatch+combine 合并
   // Prediction source: latest completed block_tm per (block_idx, region_id)
   // (overwritten whenever a newer pass's block is closed)
-  std::map<std::pair<int,int>, Matrix2D<double>*> last_block_tm;
-  std::map<std::pair<int,int>, int> last_block_tm_pass;  // which pass produced it
+  std::map<std::pair<int,int>, Matrix2D<double>*> last_block_tm;// 最新完成的 block TM(供下 pass用)
+  std::map<std::pair<int,int>, int> last_block_tm_pass;  // which pass produced it 记录 last_block_tm 是哪   pass 的                
+  //   三级管道:per-layer 实时累加 → per-block 按 pass    
+  // 合并 → 跨 pass prediction 用。
 
   // Idempotency guards — one entry per (pass, layer) or (pass, block).
   std::set<std::pair<int,int>> reconf_done;      // dispatch reconfig already triggered
@@ -421,8 +488,8 @@ struct MoEReconfigManager {
   // `pass_end_ranks[pass]` = set of ranks that have reported completion of
   // `pass`. Once its size reaches total_ranks, pass P is fully drained and
   // we close every block of pass P.
-  std::map<int, std::set<int>> pass_end_ranks;
-  std::set<int> pass_fully_drained;              // passes already processed by the hook
+  std::map<int, std::set<int>> pass_end_ranks;//pass → 已报完成的 rank 集合                
+  std::set<int> pass_fully_drained;              // passes already processed by the hook 已全员报告完成的 pass  
 
   // ---- Reconfig statistics ----
   uint64_t reconfig_triggered = 0;
@@ -435,7 +502,12 @@ struct MoEReconfigManager {
 
   // Freeze block structure from pass 0 observations — called from the pass-end
   // hook after every rank has completed pass 0. Pairs consecutive a2a layers
-  // into blocks by sorted layer_num.
+  // into blocks by sorted layer_num.ass 0 结束时冻结 MoE block 结构  ,总结每一层映射到的位置
+  // - 这是新 block 还是老 block 的第二步?           
+  // - 该重配还是该跳过?                                                            
+  // 没法决策。所以必须事先把 "layer_num → 
+  // (block_idx, 角色)" 这张映射表建好,运行时才能    
+  // O(1) 查到分支条件。               
   void freeze_structure() {
     if (structure_frozen) return;
     if (fwd_a2a_layer_order.empty()) return;
@@ -452,6 +524,10 @@ struct MoEReconfigManager {
   }
 
   // Record a forward-pass a2a layer during pass 0 (structure discovery).
+  // 函数: record_fwd_layer                      
+  // 何时调: pass 0 期间,每条 a2a flow 进入          
+  //   on_a2a_flow_start 时    
+  // 做什么: 收:把出现过的 a2a layer_num 去重存下来  
   void record_fwd_layer(int layer_num) {
     if (structure_frozen) return;
     if (fwd_a2a_layer_set.insert(layer_num).second) {
@@ -464,7 +540,7 @@ struct MoEReconfigManager {
   // safe to close: every flow of pass P has already been accumulated into
   // layer_tm (because each rank issues all its a2a flows before its own
   // pass_counter++).
-  void on_rank_pass_end(int rank, int pass, int total_ranks, int region_size) {
+  void on_rank_pass_end(int rank, int pass, int total_ranks, int region_size) {//在pass结尾进行总结
     if (pass < 0 || total_ranks <= 0) return;
     if (pass_fully_drained.count(pass)) return;   // already drained
     pass_end_ranks[pass].insert(rank);
@@ -492,7 +568,32 @@ struct MoEReconfigManager {
 
   // Close a (pass, block): sum the 2 constituent layer_tm entries into
   // block_tm and promote to last_block_tm as prediction for future passes.
-  // Idempotent.
+  // Idempotent. 
+  // "把一个 (pass, block) 的两个 
+  // layer 的 TM 合并,存档,晋升为预测源"          
+  // 的完整动作
+  //   函数入口
+  //   │
+  //   ├─ 幂等检查:block_closed.insert
+  //   │
+  //   ├─ 反查 layers_in_block = {dispatch_layer, combine_layer}
+  //   │
+  //   └─ for each region r:
+  //          sum = layer_tm[(pass, dispatch, r)] + layer_tm[(pass,
+  // combine, r)]
+  //          释放原 layer_tm 条目
+  //          block_tm[(pass, block, r)] = sum           ← 本 pass 的存档
+  //          如果 last_block_tm_pass[(block, r)] < pass:
+  //              last_block_tm[(block, r)] = copy(sum)  ← 晋升为下一
+  // pass 的预测源
+  //              last_block_tm_pass[(block, r)] = pass
+
+  // 一句话
+
+  // close_block 做三件事:合并本 pass 该 block 所有 layer 的 TM → 存档到
+  // block_tm[(pass, block, r)] → 如果比历史都新就晋升 copy 到
+  // last_block_tm[(block, r)] 给下一 pass 当预测源;过程中一并释放
+  // per-layer 累加器的内存,并用 block_closed set 保证整个动作幂等。
   void close_block(int pass, int block, int region_size) {
     if (pass < 0 || block < 0) return;
     auto marker = std::make_pair(pass, block);
@@ -545,6 +646,8 @@ struct MoEReconfigManager {
 
   // Prediction matrix for (pass, block, region): the most recent completed
   // traffic matrix we have for this block, from any earlier pass.
+  // 对应双读:先精确找 block_tm,找不到退
+  //last_block_tm。         
   // Returns nullptr if we have no history yet (pass 0 block 0 typically).
   Matrix2D<double>* get_prediction_matrix(int pass, int block, int region_id) {
     // Prefer immediate predecessor pass (P-1, block, region)
@@ -562,7 +665,11 @@ struct MoEReconfigManager {
 
   // Skip-reconfig check: if the top-N hottest pairs from the prediction
   // matrix are already present in the current OCS conn, no reconfig needed.
+  // OCS 按 region 切分,每个 region 独立判断。任一 region 缺 top-N
+  // 中的一个 pair → 整体决定重配(要重配就全重配,因为 manager
+  // 一次触发所有 region 的重配,不是 per-region)。
   bool should_skip_reconfig(int pass, int block, int region_size) {
+    return true ; // TODO: re-enable after validation
     if (g_reconf_top_n <= 0 || g_mixnet_topo == nullptr || g_topomanager == nullptr) return false;
     if (pass <= 0) return false;  // pass 0 has no prediction, must reconfig (cold)
 
@@ -590,7 +697,7 @@ struct MoEReconfigManager {
                 [](const auto& a, const auto& b) { return a.first > b.first; });
 
       if (decision_skip) {
-        int check_count = std::min(g_reconf_top_n, (int)pairs.size());
+        int check_count = std::min(g_reconf_top_n, (int)pairs.size());//根据top-N 参数决定检查多少对流量最大的 pair
         for (int k = 0; k < check_count; k++) {
           int i = pairs[k].second.first;
           int j = pairs[k].second.second;
@@ -618,6 +725,10 @@ struct MoEReconfigManager {
   // Submit current prediction to demand_recorder and schedule the regional
   // reconfig events. Returns the latest scheduled reconfig_end_time so the
   // triggering flow can be deferred until reconfig completes.
+  //  当 on_a2a_flow_start 决定"必须重配"(should_skip_reconfig 返回
+  // false),就调这个函数。对每个 region 提交预测 TM 给底层 
+  // topomanager,让它按 TM 计算新的 OCS 连接方案并开始切换,返回 max_end
+  // 供上层 defer flow。 
   simtime_picosec trigger_proactive_reconfig(int pass, int block, int layer_num) {
     if (g_demand_recorder == nullptr || g_topomanager == nullptr) return 0;
 
@@ -672,12 +783,12 @@ struct MoEReconfigManager {
       it = layer_tm.find(lkey);
     }
     it->second->add_elem_by(local_src, local_dst, (double)flow_size);
-    std::cout << "[ACC] pass=" << pass_counter
+    TRACE2(std::cout << "[ACC] pass=" << pass_counter
               << " layer=" << layer_num
               << " region=" << region_id
               << " src_m=" << src_machine << " (local " << local_src << ")"
               << " dst_m=" << dst_machine << " (local " << local_dst << ")"
-              << " size=" << flow_size << std::endl;
+              << " size=" << flow_size << std::endl);
 
     // Reconfig decision: only at the dispatch layer (first-in-pair), once per
     // (pass, layer). We gate on structure_frozen so the cold first pass
@@ -736,6 +847,11 @@ static MoEReconfigManager g_moe_reconfig_mgr;
 // OCS circuit was torn down by a subsequent reconfig). If so, rebuild an ECS
 // Route (copy topology path + append Sink/Src endpoints) and swap via reroute_to.
 // Returns true if we rerouted. Registered as TcpSrc::on_rtx_stuck.
+// - 某 flow 本次重配时恰好没包在死 queue                 
+//   里(比如已经发完本轮)→ 不算 dead                        
+//   - 但它下一轮又要发包,送进 OCS queue,这次 queue 还是 0  
+//   bitrate → 包出不去 → RTO                               
+//   - 这时 RTO 钩子再调这个函数兜底     
 inline bool reroute_flow_if_dead(TcpSrc* tcp) {
   if (tcp == nullptr || tcp->_finished) return false;
   if (tcp->is_elec) return false;                // already on ECS
@@ -778,15 +894,63 @@ static uint64_t g_flow_bytes_ecs = 0;
 static uint64_t g_flow_bytes_nvlink = 0;
 static uint64_t g_flow_count_deferred = 0;
 
+// Per-pass a2a OCS/ECS breakdown. Keyed by flowTag.pass_counter (-1 = unstamped).
+// Only cross-machine a2a flows are counted; populated after the final routing
+// decision in SendFlow so descaled/fallback paths are attributed correctly.
+static std::map<int, uint64_t> g_a2a_flow_count_ocs_by_pass;
+static std::map<int, uint64_t> g_a2a_flow_count_ecs_by_pass;
+static std::map<int, uint64_t> g_a2a_bytes_ocs_by_pass;
+static std::map<int, uint64_t> g_a2a_bytes_ecs_by_pass;
+
+void SendFlow(int src, int dst, uint64_t maxPacketCount,
+              void (*msg_handler)(void *fun_arg), void *fun_arg,
+              int tag, AstraSim::sim_request *request);
+
+#include "entry_prenet.h"
+
 void SendFlow(int src, int dst, uint64_t maxPacketCount,
               void (*msg_handler)(void *fun_arg), void *fun_arg,
               int tag, AstraSim::sim_request *request) {
+#ifdef PRENET_ENABLED
+  if (g_topo_type == TOPO_PRENET) {
+    SendFlowPrenet(src, dst, maxPacketCount, msg_handler, fun_arg, tag, request);
+    return;
+  }
+#endif
+  // SendFlow
+  //   │
+  //   ├─ TOPO_PRENET? → SendFlowPrenet return
+  //   │
+  //   ├─ portNumber++ / 统计累加
+  //   │
+  //   ├─ 同机 (src_m == dst_m)?
+  //   │   └─ NVLink CallbackEvent 延迟 transfer_time → htsim_flow_finish
+  //  [阶段3 return]
+  //   │
+  //   ├─ 主动重配 defer 检查(MoE a2a first flow)?
+  //   │   └─ defer 到 reconfig_end_time  [阶段4 return]
+  //   │
+  //   ├─ 撞上重配窗口?
+  //   │   └─ defer 到 reconfig_end_time  [阶段5 return]
+  //   │
+  //   ├─ 路由决策:conn[src_m][dst_m] > 0 且是 a2a?→ use_ocs=true
+  //   │
+  //   ├─ 建 DCTCPSrc + TcpSink + registerTcp
+  //   │
+  //   ├─ 取 Route:
+  //   │   ├─ OCS:get_paths (双向都通则用)
+  //   │   ├─ ECS:get_eps_paths (走 fat-tree)
+  //   │   └─ 空就降级 ECS
+  //   │
+  //   ├─ 复制 Route + append endpoint
+  //   ├─ flowSrc->connect(routeout, routein, sink, now)
+  //   └─ waiting_to_{sent_callback,notify_receiver}[...]++
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
 
   if (maxPacketCount == 0) maxPacketCount = 1;
 
   // Track port number (same as ns3)
-  uint32_t port = portNumber[src][dst]++;
+  uint32_t port = portNumber[src][dst]++;//分配flow
   sender_src_port_map[make_pair(port, make_pair(src, dst))] = request->flowTag;
 
   int flow_id = request->flowTag.current_flow_id;
@@ -812,10 +976,12 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
 
     g_flow_count_nvlink++;
     g_flow_bytes_nvlink += maxPacketCount;
-    if (g_flow_count_nvlink <= 5) {
-      cout << "[SendFlow] NVLink: src=" << src << " dst=" << dst
-           << " size=" << maxPacketCount << " com_type=" << com_type << endl;
-    }
+    TRACE2(
+      if (g_flow_count_nvlink <= 5) {
+        cout << "[SendFlow] NVLink: src=" << src << " dst=" << dst
+             << " size=" << maxPacketCount << " com_type=" << com_type << endl;
+      }
+    );
 
     HtsimFlowContext* ctx = new HtsimFlowContext{src, dst, maxPacketCount, request->flowTag};
     CallbackEvent* ev = new CallbackEvent(*g_eventlist, htsim_flow_finish, (void*)ctx);
@@ -830,7 +996,7 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
   // Skip on deferred replay: the flow was already accumulated and decided on
   // its first entry through SendFlow; we must not re-enter the manager.
   if (g_topo_type == TOPO_MIXNET && com_type == 4 && g_mixnet_topo != nullptr &&
-      !g_force_ecs_only && !g_replaying_deferred_flow) {
+      !g_force_ecs_only && !g_replaying_deferred_flow) {//如果是a2a操作流的话
     int layer_num = request->flowTag.layer_num;
     int pass_counter = request->flowTag.pass_counter;
     int loop_state = request->flowTag.loop_state;
@@ -838,7 +1004,7 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
         pass_counter, loop_state, layer_num,
         src_machine, dst_machine, maxPacketCount, g_mixnet_topo->region_size);
 
-    if (reconf_result.should_defer) {
+    if (reconf_result.should_defer) {// 打包 DeferredSendData,挂到 reconfig_end_time
       // Proactive reconfig triggered — defer this flow
       g_flow_count_deferred++;
       DeferredSendData dsd;
@@ -856,7 +1022,7 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
 
   // ---- Ongoing reconfig defer check (all a2a flows, not just OCS) ----
   if (g_topo_type == TOPO_MIXNET && com_type == 4 && g_topomanager != nullptr && g_mixnet_topo != nullptr) {
-    int region_id = src_machine / g_mixnet_topo->region_size;
+    int region_id = src_machine / g_mixnet_topo->region_size;//Defer 检查撞上进行中的重配
     if (region_id < (int)g_topomanager->regional_topo_managers.size()) {
       RegionalTopoManager* rtm = g_topomanager->regional_topo_managers[region_id];
       if (rtm->reconfig_end_time > 0 && g_eventlist->now() < rtm->reconfig_end_time) {
@@ -869,7 +1035,7 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
         dsd.tag = tag;
         dsd.request = *request;
         DeferredSendEvent* ev = new DeferredSendEvent(*g_eventlist, dsd);
-        g_eventlist->sourceIsPending(*ev, rtm->reconfig_end_time);
+        g_eventlist->sourceIsPending(*ev, rtm->reconfig_end_time);//延迟机制,触发时做的事:doNextEvent(entry.h:1100-1109)
         return;
       }
     }
@@ -881,7 +1047,7 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
   if (g_topo_type == TOPO_MIXNET) {
     // Mixnet mode: OCS/ECS selection logic
     static int ocs_dbg_count = 0;
-    if (com_type == 4 && g_mixnet_topo != nullptr) {
+    if (com_type == 4 && g_mixnet_topo != nullptr) {//路由决策 OCS / ECS
       if (src_machine < (int)g_mixnet_topo->conn.size() &&
           dst_machine < (int)g_mixnet_topo->conn[src_machine].size()) {
         int cv = g_mixnet_topo->conn[src_machine][dst_machine];
@@ -900,19 +1066,23 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
   if (use_ocs) {
     g_flow_count_ocs++;
     g_flow_bytes_ocs += maxPacketCount;
-    if (g_flow_count_ocs <= 10) {
-      cout << "[SendFlow] OCS: src=" << src << "(m" << src_machine << ") dst=" << dst
-           << "(m" << dst_machine << ") size=" << maxPacketCount
-           << " com_type=" << com_type << endl;
-    }
+    TRACE2(
+      if (g_flow_count_ocs <= 10) {
+        cout << "[SendFlow] OCS: src=" << src << "(m" << src_machine << ") dst=" << dst
+             << "(m" << dst_machine << ") size=" << maxPacketCount
+             << " com_type=" << com_type << endl;
+      }
+    );
   } else {
     g_flow_count_ecs++;
     g_flow_bytes_ecs += maxPacketCount;
-    if (g_flow_count_ecs <= 10) {
-      cout << "[SendFlow] ECS: src=" << src << "(m" << src_machine << ") dst=" << dst
-           << "(m" << dst_machine << ") size=" << maxPacketCount
-           << " com_type=" << com_type << endl;
-    }
+    TRACE2(
+      if (g_flow_count_ecs <= 10) {
+        cout << "[SendFlow] ECS: src=" << src << "(m" << src_machine << ") dst=" << dst
+             << "(m" << dst_machine << ") size=" << maxPacketCount
+             << " com_type=" << com_type << endl;
+      }
+    );
   }
 
   // ---- Create htsim TCP flow ----
@@ -938,11 +1108,13 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
 
   static int get_path_count = 0;
 
+
   if (g_topo_type == TOPO_MIXNET) {
     // Mixnet: OCS uses get_paths(), ECS uses get_eps_paths()
     if (use_ocs) {
       int conn_val = g_mixnet_topo->conn[src_machine][dst_machine];
       if (conn_val > 0) {
+        // OCS 需要双向都连通才能用
         srcpaths = g_mixnet_topo->get_paths(src, dst);
         int conn_rev = g_mixnet_topo->conn[dst_machine][src_machine];
         if (conn_rev > 0) {
@@ -997,6 +1169,21 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
     return;
   }
 
+  // Per-pass a2a OCS/ECS accounting. Placed AFTER all use_ocs downgrade branches
+  // (:1114/:1120/:1134) so the value reflects the route actually taken.
+  // Only cross-machine a2a flows participate; NVLink same-machine flows already
+  // returned earlier.
+  if (com_type == 4 && src_machine != dst_machine) {
+    int pass = request->flowTag.pass_counter;  // -1 if unstamped
+    if (use_ocs) {
+      g_a2a_flow_count_ocs_by_pass[pass]++;
+      g_a2a_bytes_ocs_by_pass[pass] += maxPacketCount;
+    } else {
+      g_a2a_flow_count_ecs_by_pass[pass]++;
+      g_a2a_bytes_ecs_by_pass[pass] += maxPacketCount;
+    }
+  }
+
   int choice = rand() % srcpaths->size();
   Route* routeout = new Route(*(srcpaths->at(choice)));
   routeout->push_back(flowSnk);
@@ -1005,15 +1192,16 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
   Route* routein = new Route(*(dstpaths->at(choice)));
   routein->push_back(flowSrc);
 
-  // Debug: print route lengths for first few flows
-  static int route_debug_count = 0;
-  if (route_debug_count < 5) {
-    cout << "[SendFlow] Route debug: src=" << src << " dst=" << dst
-         << " ocs=" << use_ocs
-         << " routeout_size=" << routeout->size()
-         << " routein_size=" << routein->size() << endl;
-    route_debug_count++;
-  }
+  TRACE2(
+    static int route_debug_count = 0;
+    if (route_debug_count < 5) {
+      cout << "[SendFlow] Route debug: src=" << src << " dst=" << dst
+           << " ocs=" << use_ocs
+           << " routeout_size=" << routeout->size()
+           << " routein_size=" << routein->size() << endl;
+      route_debug_count++;
+    }
+  );
 
   // Connect and start flow
   flowSrc->connect(*routeout, *routein, *flowSnk, g_eventlist->now());
@@ -1023,7 +1211,7 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
   waiting_to_notify_receiver[std::make_pair(flow_id, std::make_pair(src, dst))]++;
 }
 
-// Deferred send implementation
+// Deferred send implementation 触发的时候配置已经完成
 void DeferredSendEvent::doNextEvent() {
   // Mark as replay so SendFlow skips the MoEReconfigManager accumulator/decision
   // path (already done on the initial SendFlow call when this flow was deferred).
@@ -1033,6 +1221,13 @@ void DeferredSendEvent::doNextEvent() {
            _data.msg_handler, _data.fun_arg, _data.tag, &_data.request);
   g_replaying_deferred_flow = prev;
   delete this;
+  // 四件事:
+  // - ① 设重入标志 g_replaying_deferred_flow = true:告诉 SendFlow "这是
+  // replay,别再次进 MoE manager 累加/决策"                               
+  // - ② 重新调 SendFlow:用 _data 里存的原参数重跑一遍
+  // - ③ 恢复标志 g_replaying_deferred_flow = prev:嵌套安全(通常 prev 是  
+  // false)                                                               
+  // - ④ delete this:自毁,因为是一次性事件    
 }
 
 #endif // __ENTRY_HTSIM_H__

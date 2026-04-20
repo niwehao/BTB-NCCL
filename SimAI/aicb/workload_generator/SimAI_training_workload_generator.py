@@ -487,6 +487,7 @@ class SIMAI_workload:
                                     dp_compute_time=default_compute_time, dp_comm=dp_comm, dp_comm_size=dp_comm_size
                                     ))
                 else:
+                    assert False, "currently aiob workload generator only support SP"
                     if args.tensor_model_parallel_size == 1 :
                         forward_comm = "NONE"
                         backward_comm = "NONE"
@@ -577,19 +578,65 @@ class SIMAI_workload:
                 )
             )
 
-    def workload_generate(self):
+    def workload_generate(self):#无真机的情况下
+                                                      
+    #   CommType 枚举(utils/utils.py:544-559)把两类事件混在同一个枚举里:                                                                       
+    #   class CommType(str, Enum):              
+    #       # 通信类:11 种                                                                                                                     
+    #       all_reduce, isend, irecv, broadcast,                                                                                               
+    #       all_gather, reduce_scatter, barrier, reduce,                                                                                       
+    #       reduce_scatter_tensor, all_gather_into_tensor, all_to_all,                                                                         
+    #       # 非通信类:2 种                                           
+    #       computation      # ← 计算任务       
+    #       epoch_end        # ← epoch 分隔符(不是真任务)             
+    #                    class Work_Item:                        
+    #       name: str                          = "none"    # 任务名(比如 "attention_column" / "grad_norm")
+    #       placeholder: int                   = -1        # 占位符,目前没实际用途                                                             
+    #       # 前向阶段 ───────────────────          
+    #       forward_compute_time: int          = 0         # 前向计算时长(tick)                                                                
+    #       forward_comm: str                  = "NONE"    # 前向通信类型字符串(ALLREDUCE/ALLGATHER/...)                                       
+    #       forward_comm_size: int             = 0         # 前向通信字节数                                                                    
+    #       # 反向(input grad)阶段 ─────                                                                                                       
+    #       backward_compute_time: int         = 0         # 反向"输入梯度"计算时长                                                            
+    #       backward_comm: str                 = "NONE"    # 反向通信类型                                                                      
+    #       backward_comm_size: int            = 0         # 反向通信字节数                                                                    
+    #       # DP / 权重梯度阶段 ──────────                                                                                                     
+    #       dp_compute_time: int               = 0         # 权重梯度计算时长                                                                  
+    #       dp_comm: str                       = "NONE"    # DP 同步通信类型                                                                   
+    #       dp_comm_size: int                  = 0         # DP 同步字节数                                                                     
+    #       # 其它 ──────────────────────                                                                                                      
+    #       process_time: int                  = 100       # 杂项处理时间(很少用)
+                                                                                                                                            
+    #   ---                                     
+    #   它在 AICB 里扮演什么角色                                                                                                               
+                                                                                                                                            
+    #   1. 一个 Work_Item = 一行 .txt                                                              
+                                                                                                                                            
+    #   所以:item.comm_type == CommType.computation 就是"这是计算任务";其它值就是"这是通信任务"。 
         # args.world_size --> total gpus number
         self.ga_num = self.args.global_batch // (self.args.micro_batch * self.args.dp_num)
         if self.ga_num < 1:
-            print(
-                "[WARN]: ga num < 1, please confirm global_batch num and micro_batch num"
-            )
+            assert False, "ga num < 1, please confirm global_batch num and micro_batch num"
         default_compute_time = 1
         compute_time = 0
         tp_comm_size = (
             2 * self.args.micro_batch * self.args.seq_length * self.args.hidden_size
         )
-        layers = self.get_model_details()
+        layers = self.get_model_details()#构造出模型树
+#          MegatronModel                                                                                                                          
+#   ├── MegatronEmbedding                       (name="embedding_layer")                                                                   
+#   ├── MegatronTransformorLayer #0              (block 0)                                                                                 
+#   │   ├── MegatronAttention                   (name="attention_layer")                                                                   
+#   │   │   └── MegatronColumnLinear(qkv)       (name="..._column",比如"attention_column")                                                 
+#   │   │   └── MegatronRowLinear(out)          (name="..._row"   ,比如"attention_row")
+#   │   ├── FusedLayernorm                      (name="fused")                                                                             
+#   │   └── MegatronMlp 或 MOEMLP                                                                                                          
+#   │       ├── MegatronColumnLinear(h→4h)      (name="mlp_column")                                                                        
+#   │       └── MegatronRowLinear(4h→h)         (name="mlp_row")   ── 或 MOEMLP(name="mlp_moelayer")                                       
+#   ├── MegatronTransformorLayer #1              (block 1)                                                                                 
+#   ├── ...                                                                                                                                
+#   ├── MegatronTransformorLayer #N-1                                                                                                      
+#   └── MegatronColumnLinear(final_norm)        (name="final_column")     
         total_params, moe_param_count = self._get_total_params()
         # print(f"Total params is {total_params}, moe params is {moe_param_count}")
         # self.workload.append(Work_Item(name="norm", forward_compute_time=0,
@@ -599,18 +646,70 @@ class SIMAI_workload:
         #                         ))
         forward_compute_time = default_compute_time
         backward_compute_time = default_compute_time
+        # DP bucketing: when enabled, non-MoE DP RS is split across layers.
+        # Outer grad_norm carries (a) MoE params and (b) any residual params
+        # (e.g. FusedLayernorm) that don't produce a Work_Item in the per-layer
+        # loop. This keeps total DP bytes = 4 * total_params exactly.
+        dp_bucketing_on = getattr(self.args, 'dp_bucketing', False)
+        # Predicate: does this layer produce a Work_Item that can carry a DP
+        # REDUCESCATTER bucket? Defined once and used both in the pre-scan below
+        # AND in the per-layer loop's bucketing decision to guarantee the two
+        # sites stay in sync (otherwise total DP bytes may not equal
+        # 4 * total_params). A runtime assertion later double-checks this.
+        def _will_bucket(ln):
+            if ln.param_count <= 0:
+                return False
+            n = ln.layer_name
+            if "moelayer" in n:
+                return False
+            if self.args.enable_sequence_parallel:
+                return ("embedding" in n
+                        or "attention_linear" in n
+                        or "row" in n
+                        or "column" in n)
+            else:
+                return True
+        if dp_bucketing_on:
+            bucketed_param_count = sum(l.param_count for l in layers if _will_bucket(l))
+            # 非 MoE、且不可分桶的参数(如 FusedLayernorm)。DP RS 的字节数。
+            residual_param_count = total_params - moe_param_count - bucketed_param_count
+        else:
+            bucketed_param_count = 0
+            residual_param_count = total_params - moe_param_count
+
+        rs_size = 4 * residual_param_count
+        rs_comm = "REDUCESCATTER" if rs_size > 0 else "NONE"
+
+        # ZeRO-1 参数 AllGather:跨 DP 组(wg 槽里的无后缀 ALLGATHER 解析为 DP),
+        # 排除 MoE 参数(MoE 走 moe_grad_norm1/2 或 ep==dp 时不需同步)。
         self.workload.append(
             Work_Item(
-                name="grad_norm",
-                forward_compute_time=forward_compute_time,
-                forward_comm="ALLGATHER",
-                forward_comm_size=2 * total_params,
-                backward_compute_time=backward_compute_time,
+                name="grad_gather",
+                forward_compute_time=default_compute_time,
+                forward_comm="NONE",
+                forward_comm_size=0,
+                backward_compute_time=default_compute_time,
                 backward_comm="NONE",
                 backward_comm_size=0,
                 dp_compute_time=default_compute_time,
-                dp_comm="REDUCESCATTER",
-                dp_comm_size=4 * total_params,
+                dp_comm="ALLGATHER",
+                dp_comm_size=2 * (total_params - moe_param_count),
+            )
+        )
+        # ZeRO-1 梯度 ReduceScatter:只承担 residual(非 MoE、不可分桶的那部分),
+        # 其余非 MoE 梯度已由 per-layer bucketing 分摊。
+        self.workload.append(
+            Work_Item(
+                name="grad_param_comm",
+                forward_compute_time=default_compute_time,
+                forward_comm="NONE",
+                forward_comm_size=0,
+                backward_compute_time=default_compute_time,
+                backward_comm="NONE",
+                backward_comm_size=0,
+                dp_compute_time=default_compute_time,
+                dp_comm=rs_comm,
+                dp_comm_size=rs_size,
             )
         )
         if not self.args.enable_sequence_parallel:
@@ -639,25 +738,60 @@ class SIMAI_workload:
                                     backward_compute_time=default_compute_time, backward_comm="NONE", backward_comm_size=0,
                                     dp_compute_time=default_compute_time, dp_comm="REDUCESCATTER_DP_EP", dp_comm_size=4*moe_param_count
                                     ))
-        for _ in range(self.ga_num):
-            for layer in layers:
+        # embedding 参数梯度的 TP AllReduce(TP>1 时)
+        emb_backward_comm = "ALLREDUCE" if self.args.tensor_model_parallel_size > 1 else "NONE"
+        self.workload.append(
+            Work_Item(
+                name="embedding_grads",
+                forward_compute_time=default_compute_time,
+                forward_comm="NONE",
+                forward_comm_size=0,
+                backward_compute_time=default_compute_time,
+                backward_comm=emb_backward_comm,
+                backward_comm_size=tp_comm_size,
+                dp_compute_time=default_compute_time,
+                dp_comm="NONE",
+                dp_comm_size=0,
+            )
+        )
+        # Runtime bucketed-param accumulator. After the per-layer loop finishes
+        # we assert this equals the predicted bucketed_param_count, catching any
+        # future drift between _will_bucket() and the loop's SP branches.
+        _runtime_bucketed = 0
+        for ga_idx in range(self.ga_num):
+            # DP bucketing only fires on the LAST GA iteration, because in real
+            # training DP grad-sync happens once per pass after all GA micro-
+            # batches finish. Emitting it every GA would ga_num-inflate total DP.
+            is_last_ga = (ga_idx == self.ga_num - 1)
+            for layer in layers:#变
                 name = layer.layer_name
                 forward_comm = backward_comm = backward_comm_2 = "NONE"
                 forward_comm_size = tp_comm_size
                 backward_comm_size = tp_comm_size
                 dp_comm = "NONE"
                 dp_comm_size = 0
+                # DP bucketing for non-MoE layers: assign this layer's share of
+                # the distributed-optimizer REDUCESCATTER. MoE layers skipped
+                # (still handled by outer grad_norm / moe_grad_norm). Emitted
+                # only on last GA iteration to avoid ga_num inflation. Uses
+                # _will_bucket() so this site stays semantically identical to
+                # the pre-scan used to size grad_norm_dp_size.
+                if dp_bucketing_on and is_last_ga and _will_bucket(layer):
+                    dp_comm = "REDUCESCATTER"
+                    dp_comm_size = 4 * layer.param_count
+                    _runtime_bucketed += layer.param_count
                 if self.args.enable_sequence_parallel:
                     if "embedding" in name:
+                        emb_fwd_comm = "ALLREDUCE" if self.args.tensor_model_parallel_size > 1 else "NONE"
                         self.workload.append(
                             Work_Item(
                                 name=name,
                                 forward_compute_time=default_compute_time,
-                                forward_comm=forward_comm,
-                                forward_comm_size=forward_comm_size,
+                                forward_comm=emb_fwd_comm,
+                                forward_comm_size=tp_comm_size,
                                 backward_compute_time=default_compute_time,
-                                backward_comm=backward_comm,
-                                backward_comm_size=backward_comm_size,
+                                backward_comm="NONE",
+                                backward_comm_size=0,
                                 dp_compute_time=backward_compute_time,
                                 dp_comm=dp_comm,
                                 dp_comm_size=dp_comm_size,
@@ -692,23 +826,29 @@ class SIMAI_workload:
                     if "row" in name:
                         if self.args.recompute_activations and 'attention' in name:
                             forward_comm_size *= 2
-                        forward_comm = "REDUCESCATTER"
-                        backward_comm = "ALLGATHER"
+                        if self.args.tensor_model_parallel_size == 1:
+                            forward_comm = "NONE"
+                            backward_comm = "NONE"
+                        else:
+                            forward_comm = "REDUCESCATTER"
+                            backward_comm = "ALLGATHER"
                         self.workload.append(Work_Item(name=name, forward_compute_time=default_compute_time,
                                     forward_comm = forward_comm, forward_comm_size= forward_comm_size,
-                                    backward_compute_time=default_compute_time, backward_comm="NONE", backward_comm_size=tp_comm_size,
+                                    backward_compute_time=default_compute_time, backward_comm=backward_comm, backward_comm_size=tp_comm_size,
                                     dp_compute_time=default_compute_time, dp_comm=dp_comm, dp_comm_size=dp_comm_size
                                     ))
                     if "column" in name:
                         if self.args.recompute_activations and 'attention' in name:
                             forward_comm_size *= 2
-                        forward_comm = "ALLGATHER"
-                        forward_comm2 = "NONE"
-                        backward_comm = "REDUCESCATTER"
-                        backward_comm_2 = "ALLGATHER"
+                        if self.args.tensor_model_parallel_size == 1:
+                            forward_comm = "NONE"
+                            backward_comm = "NONE"
+                        else:
+                            forward_comm = "ALLGATHER"
+                            backward_comm = "REDUCESCATTER"
                         self.workload.append(Work_Item(name=name, forward_compute_time=default_compute_time,
                                     forward_comm = forward_comm, forward_comm_size= forward_comm_size,
-                                    backward_compute_time=default_compute_time, backward_comm="NONE", backward_comm_size=0,
+                                    backward_compute_time=default_compute_time, backward_comm=backward_comm, backward_comm_size=tp_comm_size,
                                     dp_compute_time=default_compute_time, dp_comm=dp_comm, dp_comm_size=dp_comm_size
                                     ))
                     if "moelayer" in name:
@@ -720,7 +860,7 @@ class SIMAI_workload:
                         # if args.expert_model_parallel_size != 1:
                         ep_allgather_size = 2 * self.expert_model_parallel_size * self.num_experts * self.tp
                         fwd_ep_dispatch_size = tp_comm_size * self.topk // self.tp
-                        bkwd_ep_dispatch_size = tp_comm_size * self.topk // self.tp
+                        bkwd_ep_dispatch_size = tp_comm_size * self.topk // self.tp 
                         ep_combine_size = tp_comm_size * self.topk // self.tp
 
                         if self.args.frame == "DeepSeek":
@@ -807,6 +947,18 @@ class SIMAI_workload:
                     dp_comm_size=0,
                 )
             )
+        # Conservation guard: runtime bucketed params must match the pre-scan.
+        # If this trips, the per-layer loop's SP branches have drifted from
+        # _will_bucket() (e.g. a new layer type got an append branch but was
+        # not added to the predicate), which would break total DP byte
+        # conservation (total != 4 * total_params).
+        if dp_bucketing_on:
+            assert _runtime_bucketed == bucketed_param_count, (
+                f"[dp_bucketing] DP conservation broken: pre-scan predicted "
+                f"{bucketed_param_count} params, runtime accumulated "
+                f"{_runtime_bucketed}. Update _will_bucket() to match the "
+                f"per-layer loop's append branches."
+            )
         for i in range(3):
             self.workload.append(
                 Work_Item(
@@ -840,18 +992,35 @@ class SIMAI_workload:
             )
 
     def dump_file(self, filename):
-        filename = filename + ".txt"
+        txt_filename = filename + ".txt"
+        csv_filename = filename + ".csv"
+
+        # ==== TXT 过滤器:只保留 name 命中此列表的 Work_Item ====
+        # 需要什么层就手动加进去,不想过滤就把列表清空(会保留全部)
+        keep_names = ["mlp_moelayer", "attention_row", "attention_column"]
+        if keep_names:
+            filtered = [w for w in self.workload if w.name in keep_names]
+        else:
+            filtered = self.workload
+        # =======================================================
 
         pp_comm_value = 2 * self.args.micro_batch * self.args.seq_length * self.args.hidden_size
         if self.args.enable_sequence_parallel:
             pp_comm_value /= self.args.tensor_model_parallel_size
+
 
         pp_comm = (
             f"pp_comm: {pp_comm_value}"
             if self.args.pipeline_model_parallel != 1
             else "pp_comm: 0"
         )
-        with open(filename, "w") as f:
+#           - CLI 传进来
+#   --num_layers=8,PP=4。
+#   - 这里把 args.num_layers
+#   就地覆盖成 8 // 4 =
+#   2——表示"每个 PP stage
+#   要承担的层数"。
+        with open(txt_filename, "w") as f:
             f.write((
                 f"HYBRID_TRANSFORMER_FWD_IN_BCKWD model_parallel_NPU_group: {self.args.tensor_model_parallel_size} "
                 f"ep: {self.args.expert_model_parallel_size} "
@@ -861,12 +1030,37 @@ class SIMAI_workload:
                 f"checkpoints: 0 checkpoint_initiates: 0 "
             ) + pp_comm + "\n")
 
-            f.write(str(len(self.workload)) + "\n")
-            for item in self.workload:
+            f.write(str(len(filtered)) + "\n")
+            for item in filtered:
                 f.write(
                     "\t".join([str(getattr(item, k)) for k in item.__dict__.keys()])
                     + "\n"
                 )
+
+        # CSV:同名、同字段顺序、带列名;额外补 3 列并行组(对应 astra-sim Workload.cc 的解析规则)
+        def _group_for(comm_type_str, slot):
+            if not comm_type_str or comm_type_str == "NONE":
+                return "NONE"
+            if comm_type_str.endswith("_DP_EP"):
+                return "DP_EP"
+            if comm_type_str.endswith("_EP"):
+                return "EP"
+            # 无后缀:wg 槽默认 DP,fwd/ig 槽默认 TP
+            return "DP" if slot == "wg" else "TP"
+
+        if len(self.workload) > 0:
+            columns = list(self.workload[0].__dict__.keys())
+            extra_cols = ["forward_group", "backward_group", "dp_group"]
+            with open(csv_filename, "w") as f:
+                f.write(",".join(columns + extra_cols) + "\n")
+                for item in self.workload:
+                    row = [str(getattr(item, k)) for k in columns]
+                    row += [
+                        _group_for(item.forward_comm, "fwd"),
+                        _group_for(item.backward_comm, "ig"),
+                        _group_for(item.dp_comm, "wg"),
+                    ]
+                    f.write(",".join(row) + "\n")
 
 
 class simAI_MicroTest:
@@ -985,6 +1179,6 @@ if __name__ == "__main__":
     else:
 
         work = SIMAI_workload(model, args, {})
-        name_layers = work.workload_generate()
+        name_layers = work.workload_generate()#在此生成workload,对应类在文件90line,对应函数在580lie
         work.dump_file(filepath)
         print(f"workload save in : {filepath}.txt")

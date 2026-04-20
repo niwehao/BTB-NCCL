@@ -807,6 +807,9 @@ def get_collective_test_params(parser: argparse.ArgumentParser):
 
 def get_simAI_workload_params(parser: argparse.ArgumentParser):
     parser.add_argument("--overlap_version", action="store_true")
+    parser.add_argument("--dp_bucketing", action="store_true", default=False,
+                        help="Distribute DP REDUCESCATTER per non-MoE layer for backward overlap (bucketing). "
+                             "When off, DP grad-sync happens once at end of backward via grad_norm.")
 
 def get_moe_params(parser: argparse.ArgumentParser):
     parser.add_argument('--moe_enable', action="store_true")

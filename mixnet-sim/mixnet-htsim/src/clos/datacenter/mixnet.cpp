@@ -117,7 +117,7 @@ Queue *Mixnet::alloc_queue(QueueLogger *queueLogger, uint64_t speed, mem_b queue
   else if (qt == CTRL_PRIO)
     return new CtrlPrioQueue(speedFromMbps(speed), queuesize, eventlist, queueLogger);
   else if (qt == ECN)
-    return new ECNQueue(speedFromMbps(speed), memFromPkt(queuesize), eventlist, queueLogger, memFromPkt(50));
+    return new ECNQueue(speedFromMbps(speed), queuesize, eventlist, queueLogger, memFromPkt(50));
   else if (qt == LOSSLESS)
     return new LosslessQueue(speedFromMbps(speed), memFromPkt(50), eventlist, queueLogger, NULL);
   else if (qt == LOSSLESS_INPUT)
@@ -190,7 +190,7 @@ void Mixnet::init_network()
 
   //init thresholds for lossless operation
   if (qt == LOSSLESS)
-    for (int j = 0; j < _queuesize; j++)
+    for (int j = 0; j < _no_of_nodes; j++)
     {
       switchs[j]->configureLossless();
     }

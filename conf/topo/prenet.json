@@ -1,0 +1,24 @@
+{
+  "topology": {
+    "type": "prenet",
+    "speed": 100000,
+    "queuesize": 200,
+    "alpha": 6,
+    "reconf_delay": 10,
+    "ecs_only": false,
+    "ecs_qt": "lossless_input_ecn",
+    "ocs_qt": "ecn",
+    "prenet": {
+      "variant_pool_k": 8,
+      "probe_ratio": 0.05,
+      "confidence_init": 1,
+      "confidence_max": 3,
+      "arbiter_window_us": 2,
+      "predictor_log_every": 1000
+    }
+  },
+  "simulation": {
+    "iterations": 5,
+    "rto_ms": 1
+  }
+}

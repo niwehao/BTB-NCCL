@@ -1,0 +1,22 @@
+====== Topo: /home/weihaoni/BTB-NCCL/conf/topo/mixnet.json | Workload: /home/weihaoni/BTB-NCCL/conf/workload_tmp/18-mixtral-8x7b-train-128gpu.json ======
+  Workload path (auto): SimAI/aicb/results/workload/Mixtral-8x7B-tp8-pp8-ep8-dp2-16gpu-train.txt
+  Generating workload (phase=train)...
+  python -m workload_generator.SimAI_training_workload_generator --frame=Megatron --model_name=Mixtral_8x7B --world_size=16 --tensor_model_parallel_size=8 --pipeline_model_parallel=8 --expert_model_parallel_size=8 --seq_length=256 --micro_batch=8 --global_batch=16 --num_layers=16 --hidden_size=4096 --num_attention_heads=32 --ffn_hidden_size=14336 --vocab_size=32000 --max_position_embeddings=32768 --num_experts=8 --n_shared_expert=0 --n_dense_layer=0 --q_lora_rank=0 --kv_lora_rank=0 --qk_nope_dim=128 --qk_rope_dim=0 --v_head_dim=128 --epoch_num=1 --workload_only --moe_enable --enable_sequence_parallel --swiglu --moe_grouped_gemm --moe_router_topk=2
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/weihaoni/BTB-NCCL/SimAI/aicb/workload_generator/SimAI_training_workload_generator.py", line 991, in <module>
+    args = get_params()
+           ^^^^^^^^^^^^
+  File "/home/weihaoni/BTB-NCCL/SimAI/aicb/utils/utils.py", line 657, in get_params
+    args.world_size % (args.tensor_model_parallel_size * args.pipeline_model_parallel) == 0
+AssertionError: world size: 16, tp: 8, pp: 8
+Failed to import 'torch'.
+Failed to import 'torch'.
+  Error: workload generation did not produce: SimAI/aicb/results/workload/Mixtral-8x7B-tp8-pp8-ep8-dp2-16gpu-train.txt
+  Check SimAI/aicb/results/workload/ for generated files
+None-Mixtral_8x7B-world_size128-tp8-pp8-ep8-gbs64-mbs8-seq4096-MOE-True-GEMM-True-flash_attn-False.txt
+None-Mixtral_8x7B-world_size256-tp8-pp4-ep8-gbs64-mbs8-seq4096-MOE-True-GEMM-True-flash_attn-False.txt
+None-Mixtral_8x7B-world_size256-tp8-pp8-ep8-gbs64-mbs8-seq4096-MOE-True-GEMM-True-flash_attn-False.txt
+None-Mixtral_8x7B-world_size64-tp8-pp1-ep8-gbs64-mbs8-seq256-MOE-True-GEMM-True-flash_attn-False.txt
+Qwen3-Moe-235B-world_size128-tp4-pp2-ep8-bs1-seq1024-decode.txt

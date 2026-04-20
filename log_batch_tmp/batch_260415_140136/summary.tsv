@@ -1,0 +1,7 @@
+topo	workload	sim_time_ms	pass1_ms	pass_avg_ms	reconfigs_trig	reconfigs_skip	retx	final_log
+mixnet	18-mixtral-8x7b-train-128gpu	4004.56	274.797	677.36	0	8	33	/home/weihaoni/BTB-NCCL/log_batch_tmp/batch_260415_140136/18-mixtral-8x7b-train-128gpu__mixnet_OCS_0415_140140
+fattree	18-mixtral-8x7b-train-128gpu	NO_STATS	-	-	-	-	-	
+mixnet	18-mixtral-8x7b-train-128gpu-sew15	3806.69	274.851	657.265	0	8	56	/home/weihaoni/BTB-NCCL/log_batch_tmp/batch_260415_140136/18-mixtral-8x7b-train-128gpu-sew15__mixnet_OCS_0415_140139
+fattree	18-mixtral-8x7b-train-128gpu-sew15	1202.05	95.0575	201.272	0	0	0	/home/weihaoni/BTB-NCCL/log_batch_tmp/batch_260415_140136/18-mixtral-8x7b-train-128gpu-sew15__fattree_0415_140140
+mixnet	18-mixtral-8x7b-train-128gpu-v4	3806.69	274.851	657.265	0	8	56	/home/weihaoni/BTB-NCCL/log_batch_tmp/batch_260415_140136/18-mixtral-8x7b-train-128gpu-v4__mixnet_OCS_0415_145708
+fattree	18-mixtral-8x7b-train-128gpu-v4	1202.05	95.0575	201.272	0	0	0	/home/weihaoni/BTB-NCCL/log_batch_tmp/batch_260415_140136/18-mixtral-8x7b-train-128gpu-v4__fattree_0415_145721

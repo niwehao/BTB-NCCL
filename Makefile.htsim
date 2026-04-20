@@ -127,6 +127,17 @@ HTSIM_DC_SRCS := \
 	$(HTSIM_DIR)/datacenter/firstfit.cpp \
 	$(HTSIM_DIR)/datacenter/connection_matrix.cpp
 
+# ======== Prenet (isolated; toggle with PRENET=0 to exclude entirely) ========
+PRENET ?= 1
+ifeq ($(PRENET),1)
+  HTSIM_DC_SRCS += $(HTSIM_DIR)/datacenter/prenet.cpp
+  HTSIM_SRCS    += $(HTSIM_DIR)/prenet_topomanager.cpp \
+                   $(HTSIM_DIR)/prenet_predictor.cpp \
+                   $(HTSIM_DIR)/prenet_arbiter.cpp \
+                   $(HTSIM_DIR)/prenet_variant_pool.cpp
+  CXXFLAGS += -DPRENET_ENABLED
+endif
+
 # ======== Frontend (new htsim backend) ========
 FRONTEND_SRCS := \
 	$(FRONTEND_DIR)/AstraSimNetwork.cc

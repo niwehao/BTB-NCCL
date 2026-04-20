@@ -1,0 +1,49 @@
+======== Run Configuration ========
+Topology: fattree
+GPUs: 64
+TP: 8  PP: 1  EP: 8  DP: 8
+Iterations: 5
+Link speed: 100000 Mbps
+Machines: 8
+FatTree link speed: 800000 Mbps
+FatTree nodes: 16  K=4
+Queue type: ECN
+
+======== Flow Statistics ========
+Network flows: 38080 (1324765653120 bytes, 1.26339e+06 MB)
+NVLink flows:  824320 (12610500689920 bytes, 1.20263e+07 MB)
+
+Flow count ratio:
+  Network: 4.41558%
+  NVLink:  95.5844%
+
+Bytes ratio:
+  Network: 9.50657%
+  NVLink:  90.4934%
+
+======== Traffic by Collective Type ========
+  ReduceScatter: flows=217280 bytes=6285452902400 (5.99428e+06 MB, 45.1046%)
+  AllGather: flows=322560 bytes=6449855856640 (6.15106e+06 MB, 46.2844%)
+  AllReduce: flows=286720 bytes=147690618880 (140849 MB, 1.05983%)
+  AllToAll: flows=35840 bytes=1052266965120 (1.00352e+06 MB, 7.55111%)
+
+======== Retransmission Statistics ========
+RTO: 1 ms
+Total packets sent: 1325418972000
+Total retransmissions: 6
+Retransmission rate: 4.52687e-10%
+TCP flows tracked: 38085
+
+======== Timing ========
+Total events: 8088020759
+Final sim time: 6044.83 ms
+
+======== Per-Pass Timing ========
+Pass 1: 1137.46 ms (end 1137.46 ms)
+Pass 2: 1229.89 ms (end 2367.35 ms)
+Pass 3: 1170.52 ms (end 3537.87 ms)
+Pass 4: 1203.53 ms (end 4741.4 ms)
+Pass 5: 1240.52 ms (end 5981.92 ms)
+Avg per pass: 1196.38 ms  (min 1137.46, max 1240.52)
+
+Log directory: /home/weihaoni/BTB-NCCL/log/fattree_0419_201257

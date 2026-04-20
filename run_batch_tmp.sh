@@ -25,7 +25,7 @@ TOPOS=()
 DO_BUILD=false
 DO_GEN=false
 OUT_DIR=""
-PARALLEL=4
+PARALLEL=2
 
 # 参数解析 (支持 --parallel=N / -P N / --parallel N)
 i=1

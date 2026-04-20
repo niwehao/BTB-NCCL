@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iostream>
 #include <queue>
+#include <set>
 #include <stdio.h>
 #include <string>
 #include <unistd.h>
@@ -62,8 +63,15 @@ void (*on_pass_end_hook)(int) = nullptr;
 // matrix only after all ranks have reported pass P done.
 void (*on_rank_pass_end_hook)(int rank, int pass) = nullptr;
 
+// Global trace verbosity (declared extern in MockNcclLog.h, read by TRACE1/TRACE2).
+// CLI: --trace_level N (0=silent, 1=important, 2=full debug). Default: 1.
+int g_trace_level = 1;
+
 // ======== ASTRASimNetwork class (same interface as ns3 version) ========
 class ASTRASimNetwork : public AstraSim::AstraNetworkAPI {
+  //ASTRASimNetwork 是 astra-sim 核心和 htsim
+  // 仿真器之间的适配器(adapter),每个 GPU 一个实例,实现了
+  // AstraNetworkAPI 抽象接口。
 private:
   int npu_offset;
 
@@ -75,15 +83,18 @@ public:
 
   int sim_comm_size(AstraSim::sim_comm comm, int *size) { return 0; }
 
-  int sim_finish() {
+  int sim_finish() {//当一个 rank 跑完所有 pass, 退出 sim loop 时通知网络后端。
     cout << "[htsim] sim_finish called by node " << rank << endl;
     // Per-node "All data sent/received" dump disabled by user request.
     g_simulation_done = true;
     return 0;
   }
 
-  double sim_time_resolution() { return 0; }
+  double sim_time_resolution() { return 0; }//返回这个后端最小的时间步长(可能用于 astra-sim决定调度精度)。
   int sim_init(AstraSim::AstraMemoryAPI *MEM) { return 0; }
+  // 让网络后端完成它自己的启动准备(分配资源、绑定内存接 
+  // 口、连接外部仿真器等)。参数 MEM 是 astra-sim
+  // 的内存子系统接口
 
   AstraSim::timespec_t sim_get_time() {
     AstraSim::timespec_t timeSpec;
@@ -112,7 +123,7 @@ public:
     t.type = 0;
     t.fun_arg = fun_arg;
     t.msg_handler = msg_handler;
-    sentHash[make_pair(tag, make_pair(t.src, t.dest))] = t;
+    sentHash[make_pair(tag, make_pair(t.src, t.dest))] = t;// 记"我发过这条消息"(供后续 recv 匹配
     SendFlow(rank, dst, count, msg_handler, fun_arg, tag, request);
     return 0;
   }
@@ -143,11 +154,20 @@ public:
           "[htsim recv] PP recv src %d on rank %d tag %d",
           src, rank, tag);
     }
+  //   匹配逻辑(简化):
+  // if (recvHash 已有 tag 的数据)
+  //     if (已到量 == 预期量) → 立刻回调 msg_handler,删条目
+  //     if (已到量  > 预期量) → 分一部分走,剩的留在 recvHash
+  //     if (已到量  < 预期量) → 把已到的消掉,剩的挂到
+  // expeRecvHash 等
+  // else
+  //     把 recv 请求挂到 expeRecvHash,等数据到
 
     if (recvHash.find(make_pair(tag, make_pair(t.src, t.dest))) != recvHash.end()) {
       uint64_t count = recvHash[make_pair(tag, make_pair(t.src, t.dest))];
       if (count == t.count) {
-        recvHash.erase(make_pair(tag, make_pair(t.src, t.dest)));
+        recvHash.erase(make_pair(tag, make_pair(t.src, t.dest)));// 已经到达但还没有匹配 recv
+  //的数据量(从 entry.h 那边的 flow 完成回调写进来)
         if (!is_pp_simple) {
           AstraSim::RecvPacketEventHadndlerData* ehd = (AstraSim::RecvPacketEventHadndlerData*)t.fun_arg;
           assert(ehd->flowTag.child_flow_id == -1 && ehd->flowTag.current_flow_id == -1);
@@ -180,6 +200,7 @@ public:
     } else {
       if (expeRecvHash.find(make_pair(tag, make_pair(t.src, t.dest))) == expeRecvHash.end()) {
         expeRecvHash[make_pair(tag, make_pair(t.src, t.dest))] = t;
+        //expeRecvHash[tag, src, dst] — 已经 post 但数据还没到的recv
         NcclLog->writeLog(NcclLogLevel::DEBUG,
             " [Packet arrived late, registering] src %d dest %d t.count: %llu tag_id %d",
             t.src, t.dest, t.count, tag);
@@ -218,6 +239,17 @@ struct user_param {
   int expert_seed;     // random seed for expert routing
   int moe_volatility;  // MoE hotspot bucket size: every N layers share one distribution (default 1)
   int reconf_top_n;    // skip reconfig if top-N pairs already connected (0=always reconfig)
+  int trace_level;     // trace.log verbosity: 0=silent, 1=important, 2=full debug (default 1)
+  queue_type ecs_qt;   // queue type for ECS / standalone fattree-family / fc / flat
+  queue_type ocs_qt;   // queue type for mixnet / prenet OCS overlay
+
+  // --- prenet-only (ignored unless --topo prenet) ---
+  int      prenet_variant_k;
+  double   prenet_probe_ratio;
+  int      prenet_arbiter_window_us;
+  int      prenet_confidence_init;
+  int      prenet_confidence_max;
+  uint64_t prenet_predictor_log_every;
 
   user_param() {
     workload = "";
@@ -241,8 +273,42 @@ struct user_param {
     expert_seed = 42;
     moe_volatility = 1;
     reconf_top_n = 0;
+    trace_level = 1;
+    prenet_variant_k = 8;
+    prenet_probe_ratio = 0.05;
+    prenet_arbiter_window_us = 2;
+    prenet_confidence_init = 1;
+    prenet_confidence_max = 3;
+    prenet_predictor_log_every = 1000;
+    ecs_qt = LOSSLESS_INPUT_ECN;
+    ocs_qt = ECN;
   }
 };
+
+// Map queue_type enum <-> JSON/CLI string name.
+static bool parse_qt_name(const std::string& v, queue_type* out) {
+  if      (v == "random")             *out = RANDOM;
+  else if (v == "composite")          *out = COMPOSITE;
+  else if (v == "ctrl_prio")          *out = CTRL_PRIO;
+  else if (v == "ecn")                *out = ECN;
+  else if (v == "lossless")           *out = LOSSLESS;
+  else if (v == "lossless_input")     *out = LOSSLESS_INPUT;
+  else if (v == "lossless_input_ecn") *out = LOSSLESS_INPUT_ECN;
+  else return false;
+  return true;
+}
+static const char* qt_to_string(queue_type qt) {
+  switch (qt) {
+    case RANDOM:             return "RANDOM";
+    case COMPOSITE:          return "COMPOSITE";
+    case CTRL_PRIO:          return "CTRL_PRIO";
+    case ECN:                return "ECN";
+    case LOSSLESS:           return "LOSSLESS";
+    case LOSSLESS_INPUT:     return "LOSSLESS_INPUT";
+    case LOSSLESS_INPUT_ECN: return "LOSSLESS_INPUT_ECN";
+  }
+  return "UNKNOWN";
+}
 
 static void print_usage() {
   cout << "Usage: simai_htsim [options]" << endl;
@@ -267,6 +333,9 @@ static void print_usage() {
   cout << "  --expert_seed N         Random seed for expert routing (default: 42)" << endl;
   cout << "  --moe_volatility N      MoE hotspot bucket size — every N layers share one distribution (default: 1)" << endl;
   cout << "  --reconf_top_n N        Skip reconfig if top-N pairs already connected (default: 0=always reconfig, mixnet only)" << endl;
+  cout << "  --trace_level N         trace.log verbosity: 0=silent, 1=important (default), 2=full debug" << endl;
+  cout << "  --ecs_qt NAME           ECS queue type: ecn|lossless|lossless_input|lossless_input_ecn|composite|ctrl_prio|random (default: lossless_input_ecn)" << endl;
+  cout << "  --ocs_qt NAME           OCS overlay queue type (mixnet/prenet only), same values (default: ecn)" << endl;
 }
 
 static int parse_params(int argc, char* argv[], struct user_param* params) {
@@ -292,6 +361,15 @@ static int parse_params(int argc, char* argv[], struct user_param* params) {
     {"expert_seed",   required_argument, 0, 'D'},
     {"moe_volatility",required_argument, 0, 'V'},
     {"reconf_top_n",  required_argument, 0, 'n'},
+    {"trace_level",   required_argument, 0, 'L'},
+    {"prenet_variant_k",           required_argument, 0, 300},
+    {"prenet_probe_ratio",         required_argument, 0, 301},
+    {"prenet_arbiter_window_us",   required_argument, 0, 302},
+    {"prenet_confidence_init",     required_argument, 0, 303},
+    {"prenet_confidence_max",      required_argument, 0, 304},
+    {"prenet_predictor_log_every", required_argument, 0, 305},
+    {"ecs_qt",        required_argument, 0, 400},
+    {"ocs_qt",        required_argument, 0, 401},
     {"help",          no_argument,       0, 'h'},
     {0, 0, 0, 0}
   };
@@ -320,6 +398,23 @@ static int parse_params(int argc, char* argv[], struct user_param* params) {
       case 'D': params->expert_seed = stoi(optarg); break;
       case 'V': params->moe_volatility = stoi(optarg); break;
       case 'n': params->reconf_top_n = stoi(optarg); break;
+      case 'L': params->trace_level = stoi(optarg); break;
+      case 300: params->prenet_variant_k = stoi(optarg); break;
+      case 301: params->prenet_probe_ratio = stod(optarg); break;
+      case 302: params->prenet_arbiter_window_us = stoi(optarg); break;
+      case 303: params->prenet_confidence_init = stoi(optarg); break;
+      case 304: params->prenet_confidence_max = stoi(optarg); break;
+      case 305: params->prenet_predictor_log_every = (uint64_t)stoll(optarg); break;
+      case 400: {
+        queue_type q;
+        if (!parse_qt_name(optarg, &q)) { cerr << "Error: unknown --ecs_qt '" << optarg << "'" << endl; return 1; }
+        params->ecs_qt = q; break;
+      }
+      case 401: {
+        queue_type q;
+        if (!parse_qt_name(optarg, &q)) { cerr << "Error: unknown --ocs_qt '" << optarg << "'" << endl; return 1; }
+        params->ocs_qt = q; break;
+      }
       case 'h': print_usage(); return 1;
       default:  print_usage(); return 1;
     }
@@ -360,6 +455,9 @@ int main(int argc, char *argv[]) {
   else if (topo_name == "agg_os_fattree") g_topo_type = TOPO_AGG_OS_FATTREE;
   else if (topo_name == "fc")         g_topo_type = TOPO_FC;
   else if (topo_name == "flat")       g_topo_type = TOPO_FLAT;
+#ifdef PRENET_ENABLED
+  else if (topo_name == "prenet")     g_topo_type = TOPO_PRENET;
+#endif
   else {
     cerr << "Error: unknown topology '" << topo_name << "'" << endl;
     print_usage();
@@ -390,9 +488,15 @@ int main(int argc, char *argv[]) {
   string log_dir = log_base + "/" + run_dir_name + "_" + ts_buf;
   mkdir(log_dir.c_str(), 0755);
 
-  // Redirect stdout to trace.log, keep stderr for errors
+  // Redirect stdout:
+  //   trace_level == 0 → /dev/null (stats.txt still written separately)
+  //   trace_level >= 1 → trace.log; TRACE1/TRACE2 macros gate content inside.
   string trace_path = log_dir + "/trace.log";
-  freopen(trace_path.c_str(), "w", stdout);
+  if (params.trace_level <= 0) {
+    freopen("/dev/null", "w", stdout);
+  } else {
+    freopen(trace_path.c_str(), "w", stdout);
+  }
 
   // FCT output goes into log dir
   string fct_path = log_dir + "/fct_output.txt";
@@ -428,6 +532,7 @@ int main(int argc, char *argv[]) {
   g_expert_skew = params.expert_skew;
   g_expert_seed = params.expert_seed;
   g_moe_volatility = params.moe_volatility;
+  g_trace_level    = params.trace_level;
   g_reconf_top_n = params.reconf_top_n;
 
   // 1. Create htsim EventList
@@ -436,19 +541,32 @@ int main(int argc, char *argv[]) {
   g_eventlist = &eventlist;
 
   // Register per-pass timing hook (called by Workload.cc at each pass_counter++)
-  on_pass_end_hook = [](int pass_idx) {
+  on_pass_end_hook = [](int pass_idx) {//pass(iteration)结束时的仿真时间,后面写进统计报告。  
     if (g_eventlist) g_pass_end_ms.push_back(timeAsMs(g_eventlist->now()));
   };
   // Register per-rank pass-end hook. The manager counts how many ranks have
   // reported completion of pass P; once all of them do, pass P's block_tm is
   // closed and promoted to last_block_tm for the next pass's prediction.
-  on_rank_pass_end_hook = [](int rank, int pass) {
-    if (g_mixnet_topo == nullptr) return;  // only needed for mixnet topology
-    int region_size = g_mixnet_topo->region_size;
-    g_moe_reconfig_mgr.on_rank_pass_end(rank, pass, g_total_gpus, region_size);
-  };
+  //
+  // prenet/mixnet use DIFFERENT lambdas (principles §2.4) — one lambda per topo
+  // type so neither's code path interferes with the other's.
+#ifdef PRENET_ENABLED//假函数，预留接口，暂时不实现
+  if (g_topo_type == TOPO_PRENET) {
+    on_rank_pass_end_hook = [](int rank, int pass) {
+      if (g_prenet_predictor) g_prenet_predictor->on_pass_end(rank, pass);
+    };
+  } else
+#endif
+  {
+    on_rank_pass_end_hook = [](int rank, int pass) {
+      if (g_mixnet_topo == nullptr) return;  // only needed for mixnet topology
+      int region_size = g_mixnet_topo->region_size;
+      g_moe_reconfig_mgr.on_rank_pass_end(rank, pass, g_total_gpus, region_size);
+    };
+  }
 
   // 2. Compute machine count and FatTree K parameter
+  //按照数量去构造fat-tree的形状，num_machines 决定了 fat-tree 的规模和 K 参数。作者选了 "把 machine 当叶节点 + per-machine 聚合链路" 的抽象,用带宽缩减代替端口缩减。你的直觉是对的,只是代码没做那个物理级的细化 —— 要细化就得改成 per-GPU fat-tree(fattree_node = gpu_num),然后根据 α 实际去掉某些叶端口。
   int num_machines = gpu_num / params.gpus_per_server;
   int fattree_node = num_machines;
   int fattree_k = 0;
@@ -469,17 +587,23 @@ int main(int argc, char *argv[]) {
 
   if (g_topo_type == TOPO_MIXNET) {
     // OCS-ECS hybrid: FatTree (partial BW) + Mixnet OCS overlay
+  //   代码里 fat-tree 的拓扑形状只由 num_machines 决定,alpha 不改 K、不改 switch 数、不改端口数 ——            
+  // 它只改每条链路的带宽(通过 ecs_link_speed = speed × (gpus_per_server − alpha))。也就是作者选了 "把
+  // machine 当叶节点 + per-machine 聚合链路"                                                                
+  // 的抽象,用带宽缩减代替端口缩减。你的直觉是对的,只是代码没做那个物理级的细化 —— 要细化就得改成 per-GPU
+  // fat-tree(fattree_node = gpu_num),然后根据 α 实际去掉某些叶端口。
+  //1:1 无收敛 fat-tree",等速是自洽的 因为链路数量不一样
     uint32_t ecs_link_speed = params.speed * (params.gpus_per_server - params.alpha);
     cout << "[htsim] ECS link speed: " << ecs_link_speed << " Mbps" << endl;
 
     fattree = new FatTreeTopology(
         fattree_node, memFromPkt(params.queuesize_pkts),
-        NULL, &eventlist, NULL, LOSSLESS_INPUT_ECN, ecs_link_speed);
+        NULL, &eventlist, NULL, params.ecs_qt, ecs_link_speed);
     g_fattree_topo = fattree;
 
     mixnet = new Mixnet(
         gpu_num, memFromPkt(params.queuesize_pkts),
-        NULL, eventlist, NULL, ECN,
+        NULL, eventlist, NULL, params.ocs_qt,
         timeFromUs((double)params.reconf_delay_us),
         fattree, params.alpha,
         params.dp_degree, params.tp_degree, params.pp_degree, params.ep_degree,
@@ -495,7 +619,7 @@ int main(int argc, char *argv[]) {
     uint32_t full_speed = params.speed * params.gpus_per_server;
     fattree = new FatTreeTopology(
         fattree_node, memFromPkt(params.queuesize_pkts),
-        NULL, &eventlist, NULL, LOSSLESS_INPUT_ECN, full_speed);
+        NULL, &eventlist, NULL, params.ecs_qt, full_speed);
     g_fattree_topo = fattree;
     g_topology = fattree;
     cout << "[htsim] FatTree topology created (full BW: " << full_speed << " Mbps)" << endl;
@@ -504,7 +628,7 @@ int main(int argc, char *argv[]) {
     int racksz = params.os_ratio;  // hosts per rack / uplinks per rack
     auto* top = new OverSubscribedFatTree(
         fattree_k, racksz, memFromPkt(params.queuesize_pkts),
-        NULL, &eventlist, NULL, LOSSLESS_INPUT_ECN);
+        NULL, &eventlist, NULL, params.ecs_qt);
     g_topology = top;
     cout << "[htsim] OverSubscribedFatTree created (K=" << fattree_k << " racksz=" << racksz << ")" << endl;
 
@@ -512,29 +636,89 @@ int main(int argc, char *argv[]) {
     int racksz = params.os_ratio;
     auto* top = new AggOverSubscribedFatTree(
         fattree_k, racksz, memFromPkt(params.queuesize_pkts),
-        NULL, &eventlist, NULL, LOSSLESS_INPUT_ECN);
+        NULL, &eventlist, NULL, params.ecs_qt);
     g_topology = top;
     cout << "[htsim] AggOverSubscribedFatTree created (K=" << fattree_k << " racksz=" << racksz << ")" << endl;
 
   } else if (g_topo_type == TOPO_FC) {
     auto* top = new FCTopology(
         num_machines, memFromPkt(params.queuesize_pkts),
-        NULL, &eventlist, NULL, ECN);
+        NULL, &eventlist, NULL, params.ecs_qt);
     g_topology = top;
-    cout << "[htsim] FCTopology created (" << num_machines << " nodes, ECN queuesize=" << params.queuesize_pkts << "pkts)" << endl;
+    cout << "[htsim] FCTopology created (" << num_machines << " nodes, qt=" << qt_to_string(params.ecs_qt)
+         << " queuesize=" << params.queuesize_pkts << "pkts)" << endl;
 
   } else if (g_topo_type == TOPO_FLAT) {
     auto* top = new FlatTopology(
         num_machines, memFromPkt(params.queuesize_pkts),
-        NULL, &eventlist, NULL, ECN);
+        NULL, &eventlist, NULL, params.ecs_qt);
     g_topology = top;
-    cout << "[htsim] FlatTopology created (" << num_machines << " nodes, ECN queuesize=" << params.queuesize_pkts << "pkts)" << endl;
+    cout << "[htsim] FlatTopology created (" << num_machines << " nodes, qt=" << qt_to_string(params.ecs_qt)
+         << " queuesize=" << params.queuesize_pkts << "pkts)" << endl;
   }
+#ifdef PRENET_ENABLED //生成prenetwork的拓扑，预留接口，暂时不实现
+  else if (g_topo_type == TOPO_PRENET) {
+    // ECS underlay: independent FatTree instance (isolated from mixnet).
+    uint32_t ecs_link_speed = params.speed * (params.gpus_per_server - params.alpha);
+    g_prenet_ecs_underlay = new FatTreeTopology(
+        fattree_node, memFromPkt(params.queuesize_pkts),
+        NULL, &eventlist, NULL, params.ecs_qt, ecs_link_speed);
+    cout << "[PRENET] ECS underlay fattree built (k=" << fattree_k
+         << " link_speed=" << ecs_link_speed << " Mbps)" << endl;
+
+    g_prenet_topo = new Prenet(
+        gpu_num, memFromPkt(params.queuesize_pkts), eventlist, params.ocs_qt,
+        timeFromUs((double)params.reconf_delay_us),
+        g_prenet_ecs_underlay,
+        params.alpha, params.dp_degree, params.tp_degree,
+        params.pp_degree, params.ep_degree, params.gpus_per_server);
+    g_topology = g_prenet_topo;
+
+    // Config injection.
+    g_prenet_cfg.variant_pool_k        = params.prenet_variant_k;
+    g_prenet_cfg.probe_ratio           = params.prenet_probe_ratio;
+    g_prenet_cfg.arbiter_window        = timeFromUs((double)params.prenet_arbiter_window_us);
+    g_prenet_cfg.confidence_init       = params.prenet_confidence_init;
+    g_prenet_cfg.confidence_max        = params.prenet_confidence_max;
+    g_prenet_cfg.predictor_log_every   = params.prenet_predictor_log_every;
+    g_prenet_cfg.link_speed_mbps       = params.speed;
+    g_prenet_cfg.alpha                 = params.alpha;
+
+    g_prenet_variants = new PrenetVariantPool(
+        g_prenet_topo->region_size, g_prenet_topo->region_num,
+        params.alpha, params.prenet_variant_k, /*seed=*/42);
+    g_prenet_topo->variant_pool = g_prenet_variants;
+
+    // Apply default variant (index 0) to every region.
+    for (int r = 0; r < g_prenet_topo->region_num; r++) {
+      g_prenet_topo->apply_variant(r, g_prenet_variants->default_variant(r));
+    }
+
+    g_prenet_arbiter = new PrenetArbiter(eventlist, g_prenet_cfg.arbiter_window);
+
+    g_prenet_topomanager = new PrenetTopoManager(
+        g_prenet_topo, g_prenet_arbiter,
+        timeFromUs((double)params.reconf_delay_us), eventlist);
+    g_prenet_topo->topomanager = g_prenet_topomanager;
+
+    g_prenet_predictor = new PrenetPredictor(g_prenet_cfg, g_prenet_topo, g_prenet_ecs_underlay);
+
+    // Dead-OCS-route self-heal (prenet version — guarded inside).
+    TcpSrc::on_rtx_stuck = &reroute_flow_if_dead_prenet;
+
+    cout << "[PRENET] topology created: region_size=" << g_prenet_topo->region_size
+         << " region_num=" << g_prenet_topo->region_num
+         << " variant_k=" << params.prenet_variant_k << endl;
+  }
+#endif
 
   // 4. Create TCP scanner and FCT output
-  TcpRtxTimerScanner tcpRtxScanner(timeFromMs(1), eventlist);
+  TcpRtxTimerScanner tcpRtxScanner(timeFromMs(1), eventlist);//作用:创建全局 TCP 重传定时器扫描器,每 1ms 遍历一次所有注册过的 TcpSrc,检查它们是否需要重传。
+  //见mixnet-sim/mixnet-htsim/src/clos/tcp.h:612:
   g_tcp_scanner = &tcpRtxScanner;
   init_fct_output(fct_path);
+  // 作用:打开一个全局输出文件流 g_fct_output,让每条 TCP 流完成时把自己的 FCT(Flow
+  // Completion Time)记录追加进去。
 
   // 5. Mixnet-specific: traffic recorder and topo manager
   // Use unique_ptr-like pattern with raw pointers for stack lifetime
@@ -561,8 +745,8 @@ int main(int argc, char *argv[]) {
   // 6. Initialize port numbers
   for (int i = 0; i < nodes_num; i++) {
     for (int j = 0; j < nodes_num; j++) {
-      portNumber[i][j] = 10000;
-    }
+      portNumber[i][j] = 10000;//tcp从10000端口开始分配，portNumber[i][j]表示从i到j的流使用的端口号，初始值为10000，之后每创建一个流就自增1，确保每条流的五元组唯一。
+    }//代表机器对之前的通信,但是i代表GPU,只是同一个机器复用
   }
 
   // 7. Set global node count for termination
@@ -584,6 +768,9 @@ int main(int argc, char *argv[]) {
     node2nvswitch[i] = i;
     NVswitchs.push_back(i);
   }
+  // 给每个 GPU 分配它所属的                        
+  // NVSwitch(同机内的高带宽交换芯片)的 ID,并把 NVSwitch 
+  // 当成"虚拟节点"加入编号空间 
   cout << "[htsim] NVSwitch nodes: " << NVswitchs.size() << " (IDs: "
        << gpu_num << " to " << gpu_num + nvswitch_num - 1 << ")" << endl;
 
@@ -599,9 +786,9 @@ int main(int argc, char *argv[]) {
         {1},                  // queues_per_dim
         "",                   // my_sys
         params.workload,      // my_workload
-        1,                    // comm_scale
-        1,                    // compute_scale
-        1,                    // injection_scale
+        1,                    // comm_scale,集合通信的字节数缩放或者增加
+        1,                    // compute_scale,把从 txt 读进来的三种 compute_time 全部乘一次
+        1,                    // injection_scale per-event  的端点开销,用来近似 NIC / PCIe / 驱动栈的处理时间
         1,                    // total_stat_rows
         0,                    // stat_row
         RESULT_PATH,          // path
@@ -700,17 +887,18 @@ int main(int argc, char *argv[]) {
       uint32_t ecs_link_speed = params.speed * (params.gpus_per_server - params.alpha);
       stats << "ECS link speed: " << ecs_link_speed << " Mbps" << endl;
       stats << "Reconf top-N: " << params.reconf_top_n << endl;
-      stats << "Queue type (ECS): LOSSLESS_INPUT_ECN" << endl;
-      stats << "Queue type (OCS): ECN" << endl;
+      stats << "Queue type (ECS): " << qt_to_string(params.ecs_qt) << endl;
+      stats << "Queue type (OCS): " << qt_to_string(params.ocs_qt) << endl;
     } else if (g_topo_type == TOPO_FATTREE) {
       stats << "FatTree link speed: " << (params.speed * params.gpus_per_server) << " Mbps" << endl;
       stats << "FatTree nodes: " << fattree_node << "  K=" << fattree_k << endl;
-      stats << "Queue type: LOSSLESS_INPUT_ECN" << endl;
+      stats << "Queue type: " << qt_to_string(params.ecs_qt) << endl;
     } else if (g_topo_type == TOPO_OS_FATTREE || g_topo_type == TOPO_AGG_OS_FATTREE) {
       stats << "K=" << fattree_k << "  OS ratio=" << params.os_ratio << endl;
-      stats << "Queue type: LOSSLESS_INPUT_ECN" << endl;
+      stats << "Queue type: " << qt_to_string(params.ecs_qt) << endl;
     } else {
       stats << "Nodes: " << num_machines << endl;
+      stats << "Queue type: " << qt_to_string(params.ecs_qt) << endl;
     }
     stats << endl;
 
@@ -728,6 +916,25 @@ int main(int argc, char *argv[]) {
       stats << "Reconfigs triggered: " << g_moe_reconfig_mgr.reconfig_triggered << endl;
       stats << "Reconfigs skipped:   " << g_moe_reconfig_mgr.reconfig_skipped << endl;
     }
+#ifdef PRENET_ENABLED
+    if (g_topo_type == TOPO_PRENET) {
+      stats << endl;
+      stats << "======== Prenet Stats ========" << endl;
+      stats << "prenet_predictions_total: " << g_prenet_predictions_total << endl;
+      stats << "prenet_predictions_correct: " << g_prenet_predictions_correct << endl;
+      stats << "prenet_predictions_wrong: " << g_prenet_predictions_wrong << endl;
+      stats << "prenet_action_stay_ecs: " << g_prenet_action_stay_ecs << endl;
+      stats << "prenet_action_use_ocs_asis: " << g_prenet_action_use_ocs_asis << endl;
+      stats << "prenet_action_reconfig_ocs: " << g_prenet_action_reconfig_ocs << endl;
+      stats << "prenet_probes_emitted: " << g_prenet_probes_emitted << endl;
+      stats << "prenet_arbiter_wins: " << g_prenet_arbiter_wins << endl;
+      stats << "prenet_arbiter_losses: " << g_prenet_arbiter_losses << endl;
+      uint64_t total = g_prenet_predictions_correct + g_prenet_predictions_wrong;
+      if (total > 0) {
+        stats << "prenet_accuracy: " << (100.0 * g_prenet_predictions_correct / total) << "%" << endl;
+      }
+    }
+#endif
     if (total_flows > 0) {
       stats << endl;
       stats << "Flow count ratio:" << endl;
@@ -753,6 +960,85 @@ int main(int argc, char *argv[]) {
             stats << "  OCS: " << (100.0 * g_flow_bytes_ocs / cross_machine_bytes) << "%" << endl;
             stats << "  ECS: " << (100.0 * g_flow_bytes_ecs / cross_machine_bytes) << "%" << endl;
           }
+        }
+      }
+    }
+
+    // Per-pass a2a OCS hit stats (mixnet only). OCS share == "a2a traffic
+    // covered by the prediction-driven OCS configuration". pass=0 is cold
+    // (no prediction available), so the "excluding pass 0" line is the
+    // steady-state hit rate.
+    if (g_topo_type == TOPO_MIXNET) {
+      std::set<int> all_passes;
+      for (const auto& kv : g_a2a_flow_count_ocs_by_pass) all_passes.insert(kv.first);
+      for (const auto& kv : g_a2a_flow_count_ecs_by_pass) all_passes.insert(kv.first);
+      for (const auto& kv : g_a2a_bytes_ocs_by_pass)      all_passes.insert(kv.first);
+      for (const auto& kv : g_a2a_bytes_ecs_by_pass)      all_passes.insert(kv.first);
+
+      if (!all_passes.empty()) {
+        auto getv = [](const std::map<int,uint64_t>& m, int k)->uint64_t {
+          auto it = m.find(k); return it == m.end() ? 0 : it->second;
+        };
+        stats << endl;
+        stats << "======== A2A Prediction Hit (OCS) - Per Pass ========" << endl;
+        stats << "  OCS share = a2a bytes routed over OCS / all cross-machine a2a bytes" << endl;
+        stats << "  pass=0 is cold (no prediction available); pass>=1 reflects prediction hit rate" << endl;
+
+        uint64_t tot_f_ocs = 0, tot_f_ecs = 0, tot_b_ocs = 0, tot_b_ecs = 0;
+        uint64_t tot_f_ocs_np0 = 0, tot_f_ecs_np0 = 0, tot_b_ocs_np0 = 0, tot_b_ecs_np0 = 0;
+
+        for (int p : all_passes) {
+          uint64_t f_ocs = getv(g_a2a_flow_count_ocs_by_pass, p);
+          uint64_t f_ecs = getv(g_a2a_flow_count_ecs_by_pass, p);
+          uint64_t b_ocs = getv(g_a2a_bytes_ocs_by_pass, p);
+          uint64_t b_ecs = getv(g_a2a_bytes_ecs_by_pass, p);
+          uint64_t f_tot = f_ocs + f_ecs;
+          uint64_t b_tot = b_ocs + b_ecs;
+          double f_share = (f_tot > 0) ? (100.0 * f_ocs / f_tot) : 0.0;
+          double b_share = (b_tot > 0) ? (100.0 * b_ocs / b_tot) : 0.0;
+
+          std::string label = (p < 0) ? "unstamped" : ("pass=" + std::to_string(p));
+          std::string note  = (p == 0) ? "  (cold: no prediction)" : "";
+          stats << "  " << label
+                << ": a2a_flows=" << f_tot
+                << " ocs=" << f_ocs << " ecs=" << f_ecs
+                << " | bytes=" << (b_tot / 1048576.0) << "MB"
+                << " ocs=" << (b_ocs / 1048576.0) << "MB"
+                << " ecs=" << (b_ecs / 1048576.0) << "MB"
+                << " | ocs_flow_share=" << f_share << "%"
+                << " ocs_bytes_share=" << b_share << "%"
+                << note << endl;
+
+          tot_f_ocs += f_ocs; tot_f_ecs += f_ecs;
+          tot_b_ocs += b_ocs; tot_b_ecs += b_ecs;
+          if (p >= 1) {
+            tot_f_ocs_np0 += f_ocs; tot_f_ecs_np0 += f_ecs;
+            tot_b_ocs_np0 += b_ocs; tot_b_ecs_np0 += b_ecs;
+          }
+        }
+
+        uint64_t f_tot = tot_f_ocs + tot_f_ecs;
+        uint64_t b_tot = tot_b_ocs + tot_b_ecs;
+        double f_share = (f_tot > 0) ? (100.0 * tot_f_ocs / f_tot) : 0.0;
+        double b_share = (b_tot > 0) ? (100.0 * tot_b_ocs / b_tot) : 0.0;
+        stats << "  ----------------------------------------------------" << endl;
+        stats << "  Total: a2a_flows=" << f_tot
+              << " ocs=" << tot_f_ocs << " ecs=" << tot_f_ecs
+              << " | bytes=" << (b_tot / 1048576.0) << "MB"
+              << " ocs=" << (tot_b_ocs / 1048576.0) << "MB"
+              << " ecs=" << (tot_b_ecs / 1048576.0) << "MB"
+              << " | ocs_flow_share=" << f_share << "%"
+              << " ocs_bytes_share=" << b_share << "%" << endl;
+
+        uint64_t f_tot_np0 = tot_f_ocs_np0 + tot_f_ecs_np0;
+        uint64_t b_tot_np0 = tot_b_ocs_np0 + tot_b_ecs_np0;
+        if (f_tot_np0 > 0 || b_tot_np0 > 0) {
+          double f_share_np0 = (f_tot_np0 > 0) ? (100.0 * tot_f_ocs_np0 / f_tot_np0) : 0.0;
+          double b_share_np0 = (b_tot_np0 > 0) ? (100.0 * tot_b_ocs_np0 / b_tot_np0) : 0.0;
+          stats << "  Total (excl. pass 0): a2a_flows=" << f_tot_np0
+                << " | bytes=" << (b_tot_np0 / 1048576.0) << "MB"
+                << " | ocs_flow_share=" << f_share_np0 << "%"
+                << " ocs_bytes_share=" << b_share_np0 << "%" << endl;
         }
       }
     }
@@ -840,6 +1126,15 @@ int main(int argc, char *argv[]) {
   delete mixnet;
   delete fattree;
   // Note: non-mixnet topologies are cleaned up via g_topology if needed
+
+#ifdef PRENET_ENABLED
+  delete g_prenet_predictor;    g_prenet_predictor    = nullptr;
+  delete g_prenet_topomanager;  g_prenet_topomanager  = nullptr;
+  delete g_prenet_arbiter;      g_prenet_arbiter      = nullptr;
+  delete g_prenet_variants;     g_prenet_variants     = nullptr;
+  delete g_prenet_topo;         g_prenet_topo         = nullptr;
+  delete g_prenet_ecs_underlay; g_prenet_ecs_underlay = nullptr;
+#endif
 
   return 0;
 }

@@ -2,11 +2,13 @@
   "topology": {
     "type": "mixnet",
     "speed": 100000,
-    "queuesize": 8,
+    "queuesize": 100000,
     "alpha": 6,
-    "reconf_delay": 10,
+    "reconf_delay": 25000,
     "reconf_top_n": 4,
-    "ecs_only": false
+    "ecs_only": false,
+    "ecs_qt": "ecn",
+    "ocs_qt": "ecn"
   },
   "simulation": {
     "iterations": 5,

@@ -204,11 +204,26 @@ Sys::Sys(
   this->pending_events = 0;
 
   int total_disabled = 0;
-  this->physical_dims = physical_dims;
-  this->queues_per_dim = queues_per_dim;
+  this->physical_dims = physical_dims;//默认gpu_num
+  this->queues_per_dim = queues_per_dim;//queues_per_dim = 每一维允许几条并发队列,默认1
   int element = 0;
   all_queues = 0;
   total_nodes = 1;
+                                               
+  // 整段循环只有 1 维、1 条队列,实际每个 rank    
+  // 跑完这段只得到两个效果:                      
+  // 1. active_Streams[0] = 空                    
+  // list、stream_priorities[0] = 空 list(建好 1  
+  // 个队列槽)                                    
+  // 2. 把累计计数(all_queues、total_nodes)填成 1 
+  // 和 256  
+  
+  // 目前每个 rank 的 Sys 在同一时刻只允许一个 
+  // BaseStream 在跑。即使 AllReduce 被拆成 4     
+  // 块,这 4 块也得按顺序一个接一个启动,每块跑完才
+  // 启动下一块。网络侧的并发完全靠每个 BaseStream
+  //  衍生出的多条 TCP flow 来体现。 queues_per_dim.size支持多通道-channel
+  //queues_per_dim就是发送channel的数量
   for (int current_dim = 0; current_dim < queues_per_dim.size();
        current_dim++) {
     all_queues += queues_per_dim[current_dim];
@@ -244,14 +259,30 @@ Sys::Sys(
         << concurrent_streams * queues_per_dim[0] << std::endl;
   }
   max_running = 100000000;
-  scheduler_unit = new SchedulerUnit(
+  scheduler_unit = new SchedulerUnit(//BaseStream 的调度器
       this,
       queues_per_dim,
       max_running,
       active_first_phase,
       concurrent_streams);
-  vLevels = new QueueLevels(queues_per_dim, 0, NI->get_backend_type());
+  //     作用:维护"每条队列有几个 BaseStream          
+  // 在跑/排队",提供                            
+  // notify_stream_added/notify_stream_removed    
+  // 这两个钩子(Sys.cc:946/962)——新的 BaseStream
+  // 塞进 active_Streams[vnet] 时触发 added,Stream
+  //  跑完触发 removed,然后从队列拉下一个起来。
+  vLevels = new QueueLevels(queues_per_dim, 0, NI->get_backend_type());//给新 BaseStream 分配 queue_id
+  // 作用:当 Sys::generate_collective 想把一个    
+  // BaseStream 挂到某个 queue 上时,调          
+  // vLevels->get_next_queue_at_level(dim)        
+  // 拿到一个 queue_id,round-robin 遍历。       
 
+  // 它内部给每一维建一个                         
+  // QueueLevelHandler,各自维护一个 allocator
+  // 计数器。本项目只有 dim 0、queue              
+  // 数=1,所以每次调用都返回 (queue_id=0,       
+  // Clockwise)——退化到"所有 Stream 都挂 queue
+  // 0"。
   logical_topologies["AllReduce"] = new GeneralComplexTopology(
       id, physical_dims, all_reduce_implementation_per_dimension);
   logical_topologies["ReduceScatter"] = new GeneralComplexTopology(
@@ -260,6 +291,9 @@ Sys::Sys(
       id, physical_dims, all_gather_implementation_per_dimension);
   logical_topologies["AllToAll"] = new GeneralComplexTopology(
       id, physical_dims, all_to_all_implementation_per_dimension);
+  //      在本项目里,因为配置退化到"1 维 +             
+  // NcclFlowModel",这 4 个对象里面各自只有 1 个 R
+  // ingTopology(256),没有真正用到多维分层的能力。
   stream_counter = 0;
   if (id == 0) {
     std::atexit(exiting);
@@ -298,19 +332,19 @@ Sys::Sys(
   }
   // MockNccl group/comms init: required for NcclFlowModel collective implementation
   // (removed NS3_MTP/NS3_MPI/PHY_MTP guard - MockNccl is pure logic, no NS-3/MPI deps)
-  if (id == 0) std::cout << "[DBG] About to init MockNccl global group" << std::endl;
+  if (id == 0) TRACE2(std::cout << "[DBG] About to init MockNccl global group" << std::endl);
   result = mock_nccl_grobal_group_init();
   if(result == false) {
     sys_panic(
         "Unable to initialize the system grobal group because the file can not be openned");
   }
-  if (id == 0) std::cout << "[DBG] About to init MockNccl comms" << std::endl;
+  if (id == 0) TRACE2(std::cout << "[DBG] About to init MockNccl comms" << std::endl);
   result = mock_nccl_comms_init();
   if (result == false) {
     sys_panic(
         "Unable to initialize the system mockncclComm because the file can not be openned");
   }
-  if (id == 0) std::cout << "[DBG] MockNccl init done" << std::endl;
+  if (id == 0) TRACE2(std::cout << "[DBG] MockNccl init done" << std::endl);
   if (inter_dimension_scheduling == InterDimensionScheduling::OfflineGreedy ||
       inter_dimension_scheduling ==
           InterDimensionScheduling::OfflineGreedyFlex) {
@@ -1436,7 +1470,7 @@ DataSet* Sys::generate_collective(
     EventType event,
     Callable* layer_ptr ) {
   uint64_t chunk_size = determine_chunk_size(size, collective_type);
-  if(id == 0) std::cout << "chunk size is: " << chunk_size << " , size is: " << size << " , layer_num is: " << layer_num << " , node: " << id << std::endl;
+  if(id == 0) TRACE2(std::cout << "chunk size is: " << chunk_size << " , size is: " << size << " , layer_num is: " << layer_num << " , node: " << id << std::endl);
   uint64_t recommended_chunk_size = chunk_size;
   int streams = ceil(((double)size) / chunk_size);
   int64_t tmp;
@@ -1511,13 +1545,13 @@ DataSet* Sys::generate_collective(
             !dimensions_involved[dim_mapper[dim]]) {
           continue;
         }
-        if (id == 0) std::cout << "[DBG] gen_collective dim=" << dim_mapper[dim]
+        if (id == 0) TRACE2(std::cout << "[DBG] gen_collective dim=" << dim_mapper[dim]
             << " nodes_in_dim=" << topology->get_num_of_nodes_in_dimension(dim_mapper[dim])
             << " collective_type=" << (int)collective_type
-            << " chunk=" << tmp << std::endl;
+            << " chunk=" << tmp << std::endl);
         std::pair<int, RingTopology::Direction> queue =
             vLevels->get_next_queue_at_level(dim_mapper[dim]);
-        if (id == 0) std::cout << "[DBG] got queue " << queue.first << std::endl;
+        if (id == 0) TRACE2(std::cout << "[DBG] got queue " << queue.first << std::endl);
         phase = generate_collective_phase(
             collective_type,
             layer_num,
@@ -1529,7 +1563,7 @@ DataSet* Sys::generate_collective(
             InjectionPolicy::Normal,
             implementation_per_dimension[dim_mapper[dim]],
             boost_mode);
-        if (id == 0) std::cout << "[DBG] phase created, final_data_size=" << phase.final_data_size << std::endl;
+        if (id == 0) TRACE2(std::cout << "[DBG] phase created, final_data_size=" << phase.final_data_size << std::endl);
         vect.push_back(phase);
         tmp = phase.final_data_size;
       }

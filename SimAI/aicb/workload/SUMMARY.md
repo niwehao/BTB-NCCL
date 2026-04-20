@@ -94,3 +94,52 @@ bash scripts/megatron_workload_with_aiob.sh -m 13
 ## 在项目中的角色
 
 作为 AICB 的**预置数据集**，为用户提供即用的基准测试工作负载，无需从头生成。SimAI 格式文件直接用于网络仿真，物理格式文件用于真实集群测试验证。
+
+## SimAI/aicb/workload/physical/model_workload/ 目录内容                                                                                                         
+                                                                                                                                                                
+  这个目录是 aicb 为物理 GPU 集群回放(physical replay)准备的预生成 workload 文件,格式为 CSV,共 13 份(见 ls 输出)。它不是给 astra-sim / htsim                    
+  仿真用的(那一组在隔壁 SimAI/aicb/workload/simAI/model_workload/*.txt,由 Workload.cc:1345 initialize_workload 读的就是那种 .txt)。                             
+                                                                                                                                                                
+  文件格式(CSV)                                                                                                                                                 
+                                                                                                                                                                
+  以 L7B-M1-C04_Llama7B_megatron_tp2_pp1_mbs1.csv 为例:                                                                                                         
+  
+  [rank0 ~ rank127]                                                                                                                                             
+  comm_type,comm_group,comm_group_size,msg_size,stage,dst,src,additional,_elapsed_time,algbw,busbw,count                                                        
+  CommType.all_reduce,CommGroup.dp_group,64,8,init.model_setup,None,None,,None,None,None,1                                                                      
+  ...                                                                                                                                                           
+                                                                                                                                                                
+  - 第 1 行是参与的 rank 范围注释                                                                                                                               
+  - 第 2 行是表头,列含义:通信类型 / 通信组 / 通信组大小 / 消息字节数 / 所处训练阶段(init.model_setup / forward / backward / ...)/ 目标-源 rank / 附加字段 /
+  实际耗时 / 算法带宽 / 总线带宽 / 次数                                                                                                                         
+  - 之后每行是一条集合通信事件                              
+                                                                                                                                                                
+  命名规则(来自 SimAI/aicb/workload/SUMMARY.md:60-66)                                                                                                           
+                                                                                                                                                                
+  G13B-M1-C01 = GPT-13B,框架 M1 = Megatron,配置编号 C01;L7B-D1-C02 = LLaMA-7B,D1 = DeepSpeed,C02;后缀 _sp 表示启用 Sequence Parallel,_mbs1 是 micro batch size =
+   1。目录下覆盖的是 GPT-13B / GPT-175B / LLaMA-7B/13B/30B/65B 这几个模型在 Megatron 或 DeepSpeed ZeRO-2/3 下的组合。
+                                                                                                                                                                
+  谁消费这些文件                                            
+
+  SimAI/aicb/workload_applyer.py:392:                                                                                                                           
+  filename = "results/model_workload/local_deepspeed_stage3.csv"
+  applyer = WorkloadApplyer(filename=filename)                                                                                                                  
+  applyer.apply_workload()                                                                                                                                      
+  以及 workload/SUMMARY.md:86-87:
+  # 物理集群回放                                                                                                                                                
+  python workload_applyer.py --workload_path workload/physical/model_workload/xxx.csv                                                                           
+  也就是说这些 CSV 是给 workload_applyer.py 在真实 GPU 集群上跑 NCCL 回放用的,WorkloadApplyer 按每行字段重放对应的集合通信。                                    
+                                                                                                                                                                
+  对应关系                                                                                                                                                      
+                                                                                                                                                                
+  同一个模型配置在 aicb 里会成对出现:                                                                                                                           
+  - workload/physical/model_workload/*.csv — 物理集群回放用 
+  - workload/simAI/model_workload/*.txt — astra-sim / htsim 仿真用(就是 Workload::initialize_workload 解析的那种格式)                                           
+                                                                                                                     
+  注意:项目里 workload/simAI/model_workload/ 这个目录 SUMMARY.md:12-20 里列出了,但我没有 ls 过确认是否真的存在对应文件。如果你要把 physical 这份转成 astra-sim  
+  能用的格式,目录下的 CSV 不能直接喂给 astra-sim——格式完全不一样(CSV 结构化字段 vs. astra-sim 的 header+层数+每层若干字段的文本流)。                            
+                                                                                                                                                                
+  一句话                                                                                                                                                        
+                                                            
+  physical/model_workload/ 下是 aicb 生成的、在真实 GPU 集群用 workload_applyer.py 回放 NCCL 通信用的 CSV,和你之前问的 astra-sim initialize_workload            
+  无关;astra-sim 用的是 workload/simAI/model_workload/*.txt 或者你自己用 aicb 生成器新 dump 出来的文件。

@@ -1129,7 +1129,10 @@ void TcpRtxTimerScanner::doNextEvent()
 				i++;
 			}
 		}
-		eventlist().sourceIsPendingRel(*this, _scanPeriod);
+		eventlist().sourceIsPendingRel(*this, _scanPeriod);                                                             
+//     eventlist().sourceIsPendingRel(*this, _scanPeriod) = "我这个 EventSource 要求事件循环在 _scanPeriod 之后再叫我一次        
+//   doNextEvent"。这是 htsim DES 里**对象向调度器登记"下次何时再来"**的标准动作,TcpRtxTimerScanner 靠它每 1ms
+//   周期性自调度,实现 TCP 重传的集中扫描。               
 	}
 	else {
 		//std::cerr <<" TcpRtxTimerScanner::doNextEvent()"<<std::endl;

@@ -2,7 +2,8 @@
   "topology": {
     "type": "fc",
     "speed": 100000,
-    "queuesize": 200
+    "queuesize": 200,
+    "ecs_qt": "ecn"
   },
   "simulation": {
     "iterations": 1,

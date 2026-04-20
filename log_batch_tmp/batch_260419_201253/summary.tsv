@@ -1,0 +1,3 @@
+topo	workload	sim_time_ms	pass1_ms	pass_avg_ms	reconfigs_trig	reconfigs_skip	retx	final_log
+mixnet	18-mixtral-8x7b-train-128gpu	8880.09	1289.87	1693.07	1	15	718	/home/weihaoni/BTB-NCCL/log_batch_tmp/batch_260419_201253/18-mixtral-8x7b-train-128gpu__mixnet_OCS_0419_201257
+fattree	18-mixtral-8x7b-train-128gpu	6044.83	1137.46	1196.38	0	0	6	/home/weihaoni/BTB-NCCL/log_batch_tmp/batch_260419_201253/18-mixtral-8x7b-train-128gpu__fattree_0419_201257

@@ -8,17 +8,20 @@
 
 ```
 workload_generator/
-├── __init__.py
-├── workload_generator.py                    # 工作负载生成器基类
-├── SimAI_training_workload_generator.py     # SimAI 训练工作负载生成器
-├── SimAI_inference_workload_generator.py    # SimAI 推理工作负载生成器
-├── Vidur_workload_generator.py              # Vidur 推理仿真工作负载生成器
-├── generate_megatron_workload.py            # Megatron 通用工作负载生成
-├── generate_deepspeed_stage1_2_workload.py  # DeepSpeed ZeRO-1/2 工作负载生成
-├── generate_deepspeed_stage3_workload.py    # DeepSpeed ZeRO-3 工作负载生成
-├── generate_collective_test.py              # 集合通信测试工作负载生成
-├── generate_ds_trace_replay_workload.py     # DeepSpeed 日志回放工作负载生成
-├── analysis_pytorch_trace.py                # PyTorch Trace 分析工具
+- 仿真路径(4 个):产 workload 给模拟器吃                                                                                                
+    - SimAI_training_workload_generator.py → SimAI(训练)
+    - SimAI_inference_workload_generator.py → SimAI(推理)                                                                                
+    - Vidur_workload_generator.py → Vidur(推理)                                                                                          
+    - (上述共用 mocked_model/ 推算出通信序列)                                                                                            
+  - 真机路径(4 个):产 LogItem 给 aicb.py 的 WorkloadApplyer 执行真 NCCL                                                                  
+    - generate_megatron_workload.py           
+    - generate_deepspeed_stage1_2_workload.py                                                                                            
+    - generate_deepspeed_stage3_workload.py                                                                                              
+    - generate_collective_test.py                                                                                                        
+  - 辅助/基础设施(3 个):                                                                                                                 
+    - workload_generator.py(基类,不跑)                                                                                                   
+    - generate_ds_trace_replay_workload.py(从 DS log 解析)
+    - analysis_pytorch_trace.py(从 PyTorch trace 解析)   
 └── mocked_model/                            # 模拟模型架构
     ├── MockedModel.py                       # 基类定义
     ├── training/                            # 训练场景模拟模型
@@ -121,7 +124,7 @@ python -m workload_generator.SimAI_inference_workload_generator \
 python -m workload_generator.generate_megatron_workload
 ```
 
-## 设计说明
+## 使用范围
 
 采用**模拟模型 + 模板方法**模式：
 1. `MockedModel` 构建模型架构（无真实权重），只记录参数 shape
@@ -129,3 +132,53 @@ python -m workload_generator.generate_megatron_workload
 3. 具体生成器在 forward/backward/step 中填充通信操作
 4. AIOB 模式下使用真实 PyTorch 模型测量 GPU 计算时间
 5. 输出标准化的工作负载文件供仿真或回放使用
+
+───────────────┬─────────────────────────────────────────────────────────────────────────┐   
+  │     分支      │                               覆盖的模型                                │   
+  ├───────────────┼─────────────────────────────────────────────────────────────────────────┤
+  │ --frame       │ GPT / LLaMA / LLaMA2/3 / Mistral / Mixtral-8x7B(MoE)/                   │   
+  │ Megatron      │ Qwen3-MoE(训练)等所有 Megatron 风格架构                                 │   
+  ├───────────────┼─────────────────────────────────────────────────────────────────────────┤   
+  │ --frame       │ DeepSeek V3/R1(MLA + DeepSeekMoE,有独立的 mocked 模型)                  │   
+  │ DeepSeek      │                                                                         │
+  └───────────────┴─────────────────────────────────────────────────────────────────────────┘   
+
+  推理支持(走 SimAI_inference_workload_generator.py)                                            
+                                                                                                
+  靠 args.model_name 字符串子串匹配(L301-312):                                                  
+                                                                                                
+  model_name 子串: "Qwen3-Moe"                              
+  Mocked Model: MockedQwen3Moe.Qwen3MoeModel(MockedQwen3Moe.py:49)
+  Aiob Model: AiobQwen3Moe.Qwen3MoeModel                                                        
+  架构特点: Qwen3 MoE(标准 attention + sparse MoE block)                                        
+  ────────────────────────────────────────                                                      
+  model_name 子串: "Qwen3-Next"                                                                 
+  Mocked Model: MockedQwen3Next.Qwen3NextModel(MockedQwen3Next.py:58)
+  Aiob Model: AiobQwen3Next.Qwen3NextModel
+  架构特点: Qwen3-Next(含 GatedDeltaNet 线性注意力 + MoE)                                       
+  ────────────────────────────────────────
+  model_name 子串: "DeepSeek"                                                                   
+  Mocked Model: MockedDeepSeek.DeepSeekModel(MockedDeepSeek.py:471)(推理版,与训练版同名但不同类)
+  Aiob Model: AiobDeepSeek.DeepSeekModel
+  架构特点: MLA + DeepSeekMoE(推理简化版)                                                       
+  ────────────────────────────────────────
+  model_name 子串: 其它                                                                         
+  Mocked Model: 无                        
+  Aiob Model: —
+  架构特点: 报错退出 (L311 sys.exit(1))       
+
+## deepspeed
+  elif args.frame == "DeepSpeed":                                                                                                                               
+      model = DeepspeedForCausalLM(args)              # training/MockedDeepspeed.py                                                                           
+      if args.stage == 1: workload_generator = DeepSpeedStage1(args, model)                                                                                     
+      elif args.stage == 2: workload_generator = DeepSpeedStage2(args, model)                                                                                   
+      elif args.stage == 3: workload_generator = DeepSpeedStage3(args, model)                                                                                   
+  - DeepspeedForCausalLM / DeepspeedModel(MockedDeepspeed.py:46+)mock 出模型架构(只记 param shape,不带真权重)                                                   
+  - DeepSpeedStage3(generate_deepspeed_stage3_workload.py:29+)继承 WorkloadGenerator,在 forward/backward/step 里按 DeepSpeed engine 的行为(bucket               
+  reduce、_param_queue、prefetch/release、__most_recent_step_id_param_fetched_for)吐出一串 collective LogItem                                                   
+  - aicb.py:78 applyer = WorkloadApplyer(...); applyer.apply_workload() 把这些 LogItem 在真 GPU 上用 NCCL 回放                                                  
+                                                                                                                                                              
+  换言之 aicb 的 DeepSpeed 路径靠自己 mock DeepSpeed engine 的参数管理逻辑,把它展开成一串普通的 NCCL collective 调用;底层只要有 torch.distributed +             
+  NCCL,就能在真 GPU 集群跑。astra-sim / htsim 那种"纯仿真"完全不涉及。          
+  ZeRO-3 的通信由这些运行时状态决定:bucket 累积、max_live_parameters 触发的 release、prefetch 队列、param access 顺序。这些都是跨层的、动态的、取决于 bucket    
+  size / threshold 调优参数,没办法压成 "第 i 层 fp_comm = ALLGATHER 357468 字节" 这种静态表。

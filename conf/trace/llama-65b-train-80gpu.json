@@ -1,0 +1,42 @@
+{
+  "model": {
+    "name": "LLaMA-65B",
+    "world_size": 80,
+    "tp_degree": 8,
+    "pp_degree": 2,
+    "dp_degree": 5,
+    "ep_degree": 1,
+    "gpus_per_server": 8,
+    "phase": "train",
+    "seq_length": 4096,
+    "micro_batch": 1,
+    "global_batch": 40,
+    "workload": ""
+  },
+  "train": {
+    "frame": "Megatron",
+    "model_name": "LLaMA_65B",
+    "num_layers": 80,
+    "hidden_size": 8192,
+    "num_attention_heads": 64,
+    "ffn_hidden_size": 22016,
+    "vocab_size": 32000,
+    "max_position_embeddings": 4096,
+    "num_experts": 1,
+    "n_shared_expert": 0,
+    "n_dense_layer": 0,
+    "q_lora_rank": 0,
+    "kv_lora_rank": 0,
+    "qk_nope_dim": 128,
+    "qk_rope_dim": 0,
+    "v_head_dim": 128,
+    "moe_enable": false,
+    "enable_sequence_parallel": true,
+    "swiglu": true,
+    "use_flash_attn": false,
+    "recompute_activations": false,
+    "moe_grouped_gemm": false,
+    "moe_router_topk": 1,
+    "epoch_num": 1
+  }
+}

@@ -476,7 +476,7 @@ namespace MockNccl {
         uint32_t bucket = (uint32_t)(block_idx / vol);
         uint32_t seed = (uint32_t)g_expert_seed
                       ^ (bucket * 9973u)
-                      ^ ((uint32_t)i * 1013u);
+                      ^ ((uint32_t)1 * 1013u);//每一个rank的热点对象都可能不一样
         std::mt19937 rng(seed);
 
         auto weights = generate_zipf_weights(nranks, g_expert_skew, rng);

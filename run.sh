@@ -77,6 +77,13 @@ if ! command -v jq &>/dev/null; then
   exit 1
 fi
 
+# jq 的 `//` 把 null 和 false 都当作"缺失",会把用户显式写的 false 吞成默认值。
+# 这个 helper 只在值为 null 时用默认值,显式 true/false 原样返回。
+_jq_bool() {
+  local path="$1" cfg="$2" default="$3"
+  jq -r --arg d "$default" "$path | if . == null then \$d else tostring end" "$cfg"
+}
+
 # ========== Workload 生成函数 ==========
 gen_workload_inference() {
   local wl_cfg="$1"
@@ -139,13 +146,14 @@ gen_workload_train() {
   local V_HEAD_DIM=$(jq -r '.train.v_head_dim // 128' "$wl_cfg")
   local MOE_TOPK=$(jq -r '.train.moe_router_topk // null' "$wl_cfg")
   local EPOCH_NUM=$(jq -r '.train.epoch_num // 1' "$wl_cfg")
-  # --- 布尔开关 ---
-  local MOE_ENABLE=$(jq -r '.train.moe_enable // true' "$wl_cfg")
-  local SP_ENABLE=$(jq -r '.train.enable_sequence_parallel // true' "$wl_cfg")
-  local SWIGLU=$(jq -r '.train.swiglu // false' "$wl_cfg")
-  local FLASH_ATTN=$(jq -r '.train.use_flash_attn // false' "$wl_cfg")
-  local RECOMPUTE=$(jq -r '.train.recompute_activations // false' "$wl_cfg")
-  local GROUPED_GEMM=$(jq -r '.train.moe_grouped_gemm // false' "$wl_cfg")
+  # --- 布尔开关 (用 _jq_bool 避免 jq // 吞掉显式 false) ---
+  local MOE_ENABLE=$(_jq_bool '.train.moe_enable' "$wl_cfg" true)
+  local SP_ENABLE=$(_jq_bool '.train.enable_sequence_parallel' "$wl_cfg" true)
+  local SWIGLU=$(_jq_bool '.train.swiglu' "$wl_cfg" false)
+  local FLASH_ATTN=$(_jq_bool '.train.use_flash_attn' "$wl_cfg" false)
+  local RECOMPUTE=$(_jq_bool '.train.recompute_activations' "$wl_cfg" false)
+  local GROUPED_GEMM=$(_jq_bool '.train.moe_grouped_gemm' "$wl_cfg" false)
+  local DP_BUCKETING=$(_jq_bool '.train.dp_bucketing' "$wl_cfg" false)
 
   # 直接调用 python, 绕过 megatron_workload_with_aiob.sh (该脚本会覆盖 CLI 参数)
   local CMD=(python -m workload_generator.SimAI_training_workload_generator)
@@ -168,6 +176,7 @@ gen_workload_train() {
   [[ "$FLASH_ATTN" == "true" ]] && CMD+=(--use_flash_attn)
   [[ "$RECOMPUTE" == "true" ]] && CMD+=(--recompute_activations)
   [[ "$GROUPED_GEMM" == "true" ]] && CMD+=(--moe_grouped_gemm)
+  [[ "$DP_BUCKETING" == "true" ]] && CMD+=(--dp_bucketing)
   [[ "$MOE_TOPK" != "null" ]] && CMD+=(--moe_router_topk="$MOE_TOPK")
 
   # 运行并捕获输出, 从 "workload save in :" 提取实际生成的文件路径
@@ -215,6 +224,7 @@ run_config() {
   local EXPERT_SKEW=$(jq -r '.model.expert_skew // 1.0' "$wl_cfg")
   local EXPERT_SEED=$(jq -r '.model.expert_seed // 42' "$wl_cfg")
   local MOE_VOLATILITY=$(jq -r '.model.moe_volatility // 1' "$wl_cfg")
+  local TRACE_LEVEL=$(jq -r '.trace_level // 1' "$wl_cfg")
 
   # --- 读取 topology (from topo config) ---
   local TOPO=$(jq -r '.topology.type // "fattree"' "$topo_cfg")
@@ -222,9 +232,11 @@ run_config() {
   local QUEUESIZE=$(jq -r '.topology.queuesize // 8' "$topo_cfg")
   local ALPHA=$(jq -r '.topology.alpha // 4' "$topo_cfg")
   local RECONF_DELAY=$(jq -r '.topology.reconf_delay // 10' "$topo_cfg")
-  local ECS_ONLY=$(jq -r '.topology.ecs_only // false' "$topo_cfg")
+  local ECS_ONLY=$(_jq_bool '.topology.ecs_only' "$topo_cfg" false)
   local RECONF_TOP_N=$(jq -r '.topology.reconf_top_n // 0' "$topo_cfg")
   local OS_RATIO=$(jq -r '.topology.os_ratio // 2' "$topo_cfg")
+  local ECS_QT=$(jq -r '.topology.ecs_qt // "lossless_input_ecn"' "$topo_cfg")
+  local OCS_QT=$(jq -r '.topology.ocs_qt // "ecn"' "$topo_cfg")
 
   # --- 读取 simulation (from topo config) ---
   local ITERATIONS=$(jq -r '.simulation.iterations // 1' "$topo_cfg")
@@ -279,6 +291,9 @@ run_config() {
   CMD+=(--expert_skew "$EXPERT_SKEW")
   CMD+=(--expert_seed "$EXPERT_SEED")
   CMD+=(--moe_volatility "$MOE_VOLATILITY")
+  CMD+=(--trace_level "$TRACE_LEVEL")
+  CMD+=(--ecs_qt "$ECS_QT")
+  CMD+=(--ocs_qt "$OCS_QT")
 
   # 拓扑特有参数
   case "$TOPO" in
@@ -292,6 +307,17 @@ run_config() {
       ;;
     os_fattree|agg_os_fattree)
       CMD+=(--os_ratio "$OS_RATIO")
+      ;;
+    prenet)
+      CMD+=(--alpha "$ALPHA")
+      CMD+=(--reconf_delay "$RECONF_DELAY")
+      CMD+=(--prenet_variant_k "$(jq -r '.topology.prenet.variant_pool_k // 8' "$topo_cfg")")
+      CMD+=(--prenet_probe_ratio "$(jq -r '.topology.prenet.probe_ratio // 0.05' "$topo_cfg")")
+      CMD+=(--prenet_arbiter_window_us "$(jq -r '.topology.prenet.arbiter_window_us // 2' "$topo_cfg")")
+      CMD+=(--prenet_confidence_init "$(jq -r '.topology.prenet.confidence_init // 1' "$topo_cfg")")
+      CMD+=(--prenet_confidence_max "$(jq -r '.topology.prenet.confidence_max // 3' "$topo_cfg")")
+      CMD+=(--prenet_predictor_log_every "$(jq -r '.topology.prenet.predictor_log_every // 1000' "$topo_cfg")")
+      if [[ "$ECS_ONLY" == "true" ]]; then CMD+=(--ecs_only); fi
       ;;
   esac
 

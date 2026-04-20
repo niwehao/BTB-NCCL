@@ -181,8 +181,8 @@ void Workload::report() {
   AstraSimDataAPI astraSimDataAPI;
   astraSimDataAPI.run_name = run_name;
   astraSimDataAPI.workload_finished_time = ((double)Sys::boostedTick()) / FREQ;
-  std::cout<<"workload stats for the job scheduled at NPU offset: "
-            <<generator->npu_offset<<std::endl;
+  TRACE2(std::cout<<"workload stats for the job scheduled at NPU offset: "
+            <<generator->npu_offset<<std::endl);
   for (int i = 0; i < SIZE; i++) {
     #ifdef ANALYTI
     astraSimDataAPI.layers_stats.push_back(layers[i]->report(
@@ -229,9 +229,9 @@ void Workload::report() {
        astraSimDataAPI.avg_chunk_latency_per_logical_dimension) {
     latency /= FREQ;
   }
-  std::cout << "*************************" << std::endl;
-  std::cout << "all passes finished at time: " << Sys::boostedTick()
-            << ", id of first layer: " << layers[0]->id << std::endl;
+  TRACE2(std::cout << "*************************" << std::endl);
+  TRACE2(std::cout << "all passes finished at time: " << Sys::boostedTick()
+            << ", id of first layer: " << layers[0]->id << std::endl);
   generator->NI->pass_front_end_report(astraSimDataAPI);
   #ifdef NS3_MTP 
   if (this->seprate_log) {
@@ -261,6 +261,7 @@ void Workload::pp_recv_done_callback(void* arg) {
 }
 
 void Workload::issue_pp_communication(bool is_backward) {
+  return;
   if (pp_commsize == 0 || pp_size <= 1) {
     return;
   }
@@ -392,8 +393,8 @@ void Workload::iterate_data_parallel() {
         SchedulingPolicy::None, CollectiveBarrier::Non_Blocking);
     if (index == 0) {
       if (generator->id == 0) {
-        std::cout << "pass: " << pass_counter
-                  << " finished at time: " << Sys::boostedTick() << std::endl;
+        TRACE2(std::cout << "pass: " << pass_counter
+                  << " finished at time: " << Sys::boostedTick() << std::endl);
       }
       pass_counter++;
       current_state = LoopState::Forward_Pass;
@@ -477,8 +478,8 @@ void Workload::iterate_hybrid_parallel_customized() {
     if (index == -1) {
       index = 0;
       if (generator->id == 0) {
-        std::cout << "pass: " << pass_counter
-                  << " finished at time: " << Sys::boostedTick() << std::endl;
+        TRACE2(std::cout << "pass: " << pass_counter
+                  << " finished at time: " << Sys::boostedTick() << std::endl);
       }
       pass_counter++;
       current_state = LoopState::Forward_Pass;
@@ -567,8 +568,8 @@ void Workload::iterate_hybrid_parallel_data_model() {
     if (index == -1) {
       index = 0;
       if (generator->id == 0) {
-        std::cout << "pass: " << pass_counter
-                  << " finished at time: " << Sys::boostedTick() << std::endl;
+        TRACE2(std::cout << "pass: " << pass_counter
+                  << " finished at time: " << Sys::boostedTick() << std::endl);
       }
       pass_counter++;
       current_state = LoopState::Forward_Pass;
@@ -657,8 +658,8 @@ void Workload::iterate_hybrid_parallel_model_data() {
     if (index == -1) {
       index = 0;
       if (generator->id == 0) {
-        std::cout << "pass: " << pass_counter
-                  << " finished at time: " << Sys::boostedTick() << std::endl;
+        TRACE2(std::cout << "pass: " << pass_counter
+                  << " finished at time: " << Sys::boostedTick() << std::endl);
       }
       pass_counter++;
       current_state = LoopState::Forward_Pass;
@@ -787,8 +788,8 @@ void Workload::iterate_model_parallel() {
     if (index == -1) {
       index = 0;
       if (generator->id == 0) {
-        std::cout << "pass: " << pass_counter
-                  << " finished at time: " << Sys::boostedTick() << std::endl;
+        TRACE2(std::cout << "pass: " << pass_counter
+                  << " finished at time: " << Sys::boostedTick() << std::endl);
       }
       pass_counter++;
       current_state = LoopState::Forward_Pass;
@@ -902,8 +903,8 @@ void Workload::iterate_hybrid_parallel_Transformer() {
       index = 0;
       if (generator->id == 0) {
         fprintf(stderr, "\n");
-        std::cout << "pass: " << pass_counter
-                  << " finished at time: " << Sys::boostedTick() << std::endl;
+        TRACE2(std::cout << "pass: " << pass_counter
+                  << " finished at time: " << Sys::boostedTick() << std::endl);
       }
       pass_counter++;
       {
@@ -1042,8 +1043,8 @@ void Workload::iterate_hybrid_parallel_Transformer_fwd_in_bckwd() {
       index = 0;
       if (generator->id == 0) {
         fprintf(stderr, "\n");
-        std::cout << "pass: " << pass_counter
-                  << " finished at time: " << Sys::boostedTick() << std::endl;
+        TRACE2(std::cout << "pass: " << pass_counter
+                  << " finished at time: " << Sys::boostedTick() << std::endl);
       }
       pass_counter++;
       {
@@ -1082,9 +1083,9 @@ void Workload::iterate_hybrid_parallel_Transformer_fwd_in_bckwd() {
       checkpoint_initiated = true;
       generator->register_event(this, EventType::General, NULL, 1);
       if (generator->id == 0) {
-        std::cout << "***** info, initiating fwd_in_bkwd starting from layer:"
+        TRACE2(std::cout << "***** info, initiating fwd_in_bkwd starting from layer:"
                   << index << " to layer: " << tmp
-                  << " ,at time: " << Sys::boostedTick() << std::endl;
+                  << " ,at time: " << Sys::boostedTick() << std::endl);
       }
       return;
     }
@@ -1174,8 +1175,8 @@ void Workload::iterate_hybrid_parallel_DLRM() {
       index--;
     }
     if (generator->id == 0) {
-      std::cout << "*************************layer changed to: " << index
-                << std::endl;
+      TRACE2(std::cout << "*************************layer changed to: " << index
+                << std::endl);
     }
     generator->register_event(this, EventType::General, NULL, 1);
     return;
@@ -1200,8 +1201,8 @@ void Workload::iterate_hybrid_parallel_DLRM() {
     }
     if (index == 0) {
       if (generator->id == 0) {
-        std::cout << "pass: " << pass_counter
-                  << " finished at time: " << Sys::boostedTick() << std::endl;
+        TRACE2(std::cout << "pass: " << pass_counter
+                  << " finished at time: " << Sys::boostedTick() << std::endl);
       }
       pass_counter++;
       current_state = LoopState::Forward_Pass;
@@ -1227,8 +1228,8 @@ void Workload::iterate_hybrid_parallel_DLRM() {
     }
     index--;
     if (generator->id == 0) {
-      std::cout << "*************************layer changed to: " << index
-                << " in ig" << std::endl;
+      TRACE2(std::cout << "*************************layer changed to: " << index
+                << " in ig" << std::endl);
     }
     current_state = LoopState::Weight_Gradient;
     collective_issued = false;
@@ -1245,7 +1246,7 @@ int Workload::get_layer_numbers(std::string workload_input) {
               << std::endl;
     exit(1);
   } else {
-    std::cout << "Success in opening workload file" << std::endl;
+    TRACE2(std::cout << "Success in opening workload file" << std::endl);
   }
   std::string dummyLine;
   std::getline(inFile, dummyLine);
@@ -1357,7 +1358,7 @@ bool Workload::initialize_workload(std::string name) {
     exit(1);
   } else {
     if (generator->id == 0) {
-      std::cout << "Success in opening workload file" << std::endl;
+      TRACE2(std::cout << "Success in opening workload file" << std::endl);
     }
   }
  std::string firstline;
@@ -1385,7 +1386,7 @@ bool Workload::initialize_workload(std::string name) {
           if(tokens[i]=="model_parallel_NPU_group:"){
             model_parallel_npu_group = std::stoi(tokens[i+1]);
             if (generator->id == 0) {
-              std::cout <<"model_parallel_NPU_group is " << model_parallel_npu_group << std::endl;
+              TRACE2(std::cout <<"model_parallel_NPU_group is " << model_parallel_npu_group << std::endl);
             }
           }else if(tokens[i]=="ep:"){
             expert_parallel_npu_group = std::stoi(tokens[i+1]);
@@ -1402,7 +1403,7 @@ bool Workload::initialize_workload(std::string name) {
 
         if(parallelismPolicy == ParallelismPolicy::TransformerFwdInBckwd){
           if (generator->id == 0) {
-            std::cout << "checkpoints layers are: ";
+            TRACE2(std::cout << "checkpoints layers are: ");
           }
           for(size_t i = 1; i < tokens.size(); i = i+1){
             if(tokens[i]=="checkpoints:"){
@@ -1412,15 +1413,15 @@ bool Workload::initialize_workload(std::string name) {
                 int layer = std::stoi(tokens[i+j]);
                 chekpoints[layer] = true;
                 if (generator->id == 0) {
-                  std::cout << layer << ", ";
+                  TRACE2(std::cout << layer << ", ");
                 }
                 j++;
               }
                 
             }else if(tokens[i]=="checkpoint_initiates:"){
                 if (generator->id == 0) {
-                  std::cout << std::endl;
-                  std::cout << "layers initiating fwd_in_bckwd are: ";
+                  TRACE2(std::cout << std::endl);
+                  TRACE2(std::cout << "layers initiating fwd_in_bckwd are: ");
                 }
                 int account = std::stoi(tokens[i+1]);
                 while(account-- >0){
@@ -1428,12 +1429,12 @@ bool Workload::initialize_workload(std::string name) {
                   int layer = std::stoi(tokens[i+j]);
                   need_checkpoint_initiation[layer] = true;
                   if (generator->id == 0) {
-                    std::cout << layer << ", ";
+                    TRACE2(std::cout << layer << ", ");
                   }
                   j++;
                 }
                 if (generator->id == 0) {
-                  std::cout << std::endl;
+                  TRACE2(std::cout << std::endl);
                 }
               }
             }
@@ -1470,7 +1471,7 @@ bool Workload::initialize_workload(std::string name) {
     }
   }
   if (generator->id == 0) {
-      std::cout <<"pp_commize:"<< pp_commsize << std::endl;
+      TRACE2(std::cout <<"pp_commize:"<< pp_commsize << std::endl);
   }
   if(generator->id == 0){
     if (model_parallel_npu_group == 0 || expert_parallel_npu_group == 0 || pipeline_model_parallelism == 0 
@@ -1699,8 +1700,8 @@ bool Workload::initialize_workload(std::string name) {
       }
     }
     if (generator->id == 0) {
-      std::cout << "id: " << id << " , depen: " << depen
-                << " , wg_comp_time: " << wg_compute_time << std::endl;
+      TRACE2(std::cout << "id: " << id << " , depen: " << depen
+                << " , wg_comp_time: " << wg_compute_time << std::endl);
     }
     if (parallelismPolicy == ParallelismPolicy::HybridCustomized) {
       std::string specific_parallelsim;
@@ -1772,10 +1773,10 @@ bool Workload::initialize_workload(std::string name) {
     layers[i] = l;
   }
   if (generator->id == 0) {
-    std::cout << "type: " << run_type << " ,num passes: " << TOTAL_PASS
+    TRACE2(std::cout << "type: " << run_type << " ,num passes: " << TOTAL_PASS
               << " ,lines: " << lines
               << " compute scale: " << generator->compute_scale
-              << " ,comm scale: " << generator->comm_scale << std::endl;
+              << " ,comm scale: " << generator->comm_scale << std::endl);
   }
   inFile.close();
   return true;

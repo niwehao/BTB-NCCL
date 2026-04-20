@@ -28,6 +28,19 @@
 
 #define LOG_PATH  "/etc/astra-sim/"
 
+// ============================================================================
+// Trace-level gating for trace.log verbosity (stdout under htsim frontend).
+// Defined in AstraSimNetwork.cc. CLI: --trace_level N, default 1.
+//   0 = silent (nothing to stdout; stats.txt still written)
+//   1 = important events (reconfig, pass boundaries, topology, final stats)
+//   2 = full debug (per-flow accumulation, collective issue/finish, chunk gen)
+// Use TRACE1(expr) / TRACE2(expr) to gate a print. The expr itself is only
+// evaluated when the level permits.
+// ============================================================================
+extern int g_trace_level;
+#define TRACE1(expr) do { if (g_trace_level >= 1) { expr; } } while(0)
+#define TRACE2(expr) do { if (g_trace_level >= 2) { expr; } } while(0)
+
 enum class NcclLogLevel { DEBUG, INFO, WARNING,ERROR};
 
 class MockNcclLog {
