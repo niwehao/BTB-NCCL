@@ -1,3 +1,0 @@
-topo	workload	sim_time_ms	pass1_ms	pass_avg_ms	reconfigs_trig	reconfigs_skip	retx	final_log
-mixnet	18-mixtral-8x7b-train-128gpu	ERR	-	-	-	-	-	/home/weihaoni/BTB-NCCL/log_batch_tmp/batch_260419_192511/runs/001_18-mixtral-8x7b-train-128gpu__mixnet.out
-fattree	18-mixtral-8x7b-train-128gpu	ERR	-	-	-	-	-	/home/weihaoni/BTB-NCCL/log_batch_tmp/batch_260419_192511/runs/002_18-mixtral-8x7b-train-128gpu__fattree.out

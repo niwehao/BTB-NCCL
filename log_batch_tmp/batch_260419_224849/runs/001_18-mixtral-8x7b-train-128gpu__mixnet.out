@@ -1,38 +1,0 @@
-====== Topo: /home/weihaoni/BTB-NCCL/conf/topo/mixnet.json | Workload: /home/weihaoni/BTB-NCCL/conf/workload_tmp/18-mixtral-8x7b-train-128gpu.json ======
-  Workload path (auto): SimAI/aicb/results/workload/Mixtral-8x7B-tp8-pp1-ep8-dp8-64gpu-train.txt
-  Generating workload (phase=train)...
-  python -m workload_generator.SimAI_training_workload_generator --frame=Megatron --model_name=Mixtral_8x7B --world_size=64 --tensor_model_parallel_size=8 --pipeline_model_parallel=1 --expert_model_parallel_size=8 --seq_length=16384 --micro_batch=8 --global_batch=64 --num_layers=4 --hidden_size=4096 --num_attention_heads=32 --ffn_hidden_size=14336 --vocab_size=32000 --max_position_embeddings=32768 --num_experts=8 --n_shared_expert=0 --n_dense_layer=0 --q_lora_rank=0 --kv_lora_rank=0 --qk_nope_dim=128 --qk_rope_dim=0 --v_head_dim=128 --epoch_num=1 --workload_only --moe_enable --enable_sequence_parallel --swiglu --moe_grouped_gemm --moe_router_topk=2
-Failed to import 'torch'.
-Failed to import 'torch'.
-Namespace(frame='Megatron', gpu_type=None, world_size=64, tensor_model_parallel_size=8, pipeline_model_parallel=1, context_parallel_size=1, pp_rank=-1, global_batch=64, micro_batch=8, epoch_num=1, computation_enable=False, dtype='bfloat16', ffn_hidden_size=14336, enable_visual=False, workload_only=True, model_name='Mixtral_8x7B', hidden_size=4096, num_layers=4, seq_length=16384, num_attention_heads=32, vocab_size=32000, max_position_embeddings=32768, add_bias_linear=False, use_flash_attn=False, swiglu=True, stage=3, amp_enabled=False, reduce_bucket_size=500000000, allgather_bucket_size=500000000, contiguous_gradients=False, param_persistence_threshold=100000, model_persistence_threshold=9223372036854775807, max_live_parameters=1000000000, prefetch_bucket_size=1000000000, enable_sequence_parallel=True, use_distributed_optimizer=False, make_vocab_size_divisible_by=128, overlap_grad_reduce=False, begin_size=1048576, end_size=1048576, test_comm='all_reduce', iter_num=500, multi_all_reduce_enable=0, moe_enable=True, expert_model_parallel_size=8, num_experts=8, moe_router_topk=2, moe_grouped_gemm=True, activation_func=None, overlap_version=False, dp_bucketing=False, aiob_enable=False, comp_filepath=None, gated_linear_unit=True, bias_gelu_fusion=False, openai_gelu=False, onnx_safe=False, squared_relu=False, recompute_activations=False, n_dense_layers=0, n_shared_expert=0, qk_rope_dim=0, qk_nope_dim=128, q_lora_rank=0, kv_lora_rank=0, v_head_dim=128, dp_num=8, num_microbatches=1, padded_vocab_size=32768)
-243318784
-workload save in : results/workload/None-Mixtral_8x7B-world_size64-tp8-pp1-ep8-gbs64-mbs8-seq16384-MOE-True-GEMM-True-flash_attn-False.txt
-  Workload generated: /home/weihaoni/BTB-NCCL/SimAI/aicb/results/workload/None-Mixtral_8x7B-world_size64-tp8-pp1-ep8-gbs64-mbs8-seq16384-MOE-True-GEMM-True-flash_attn-False.txt
-  Topo: mixnet | GPUs: 64 | Speed: 100000Mbps | Iter: 5
-  CMD: /home/weihaoni/BTB-NCCL/simai_htsim --workload /home/weihaoni/BTB-NCCL/SimAI/aicb/results/workload/None-Mixtral_8x7B-world_size64-tp8-pp1-ep8-gbs64-mbs8-seq16384-MOE-True-GEMM-True-flash_attn-False.txt --topo mixnet --nodes 64 --gpus_per_server 8 --dp_degree 8 --tp_degree 8 --pp_degree 1 --ep_degree 8 --speed 100000 --queuesize 100000 --iterations 5 --rto 1 --expert_topk 8 --expert_skew 1.5 --expert_seed 42 --moe_volatility 1000 --trace_level 1 --ecs_qt ecn --ocs_qt ecn --alpha 6 --reconf_delay 10 --reconf_top_n 4
-
-[INIT_CONN] Initial conn matrix (8x8), alpha=6:
-  node 0: 0 1 1 1 1 0 1 1  (degree=6)
-  node 1: 1 0 1 1 1 1 1 0  (degree=6)
-  node 2: 1 1 0 1 1 1 0 1  (degree=6)
-  node 3: 1 1 1 0 0 1 1 1  (degree=6)
-  node 4: 1 1 1 0 0 1 1 1  (degree=6)
-  node 5: 0 1 1 1 1 0 1 1  (degree=6)
-  node 6: 1 1 0 1 1 1 0 1  (degree=6)
-  node 7: 1 0 1 1 1 1 1 0  (degree=6)
-[----------------------------------------]   0% pass 1/5 fwd 1/39  flows: 0/0  [----------------------------------------]   1% pass 1/5 fwd 2/39  flows: 0/0  [----------------------------------------]   1% pass 1/5 fwd 3/39  flows: 0/0  [----------------------------------------]   2% pass 1/5 fwd 4/39  flows: 0/0  [----------------------------------------]   2% pass 1/5 fwd 5/39  flows: 0/0  [OCS_DBG] src=4 m0 dst=12 m1 conn=1
-[SendFlow] src=4 dst=12 src_m=0 dst_m=1 ocs=1 srcpaths=1 dstpaths=1
-[OCS_DBG] src=4 m0 dst=20 m2 conn=1
-[SendFlow] src=4 dst=20 src_m=0 dst_m=2 ocs=1 srcpaths=1 dstpaths=1
-[OCS_DBG] src=4 m0 dst=28 m3 conn=1
-[SendFlow] src=4 dst=28 src_m=0 dst_m=3 ocs=1 srcpaths=1 dstpaths=1
-[OCS_DBG] src=4 m0 dst=36 m4 conn=1
-[SendFlow] src=4 dst=36 src_m=0 dst_m=4 ocs=1 srcpaths=1 dstpaths=1
-[OCS_DBG] src=4 m0 dst=44 m5 conn=0
-[SendFlow] src=4 dst=44 src_m=0 dst_m=5 ocs=0 srcpaths=4 dstpaths=4
-[OCS_DBG] src=4 m0 dst=52 m6 conn=1
-[OCS_DBG] src=4 m0 dst=60 m7 conn=1
-[OCS_DBG] src=5 m0 dst=13 m1 conn=1
-[OCS_DBG] src=5 m0 dst=21 m2 conn=1
-[OCS_DBG] src=5 m0 dst=29 m3 conn=1
-[###############-------------------------]  39% flows: 179/448  time: 7.9 ms  events: 10M  [##############################----------]  76% flows: 344/448  time: 23.4 ms  events: 20M  [##################################------]  86% flows: 434/504  time: 55.0 ms  events: 30M  [#---------------------------------------]   3% pass 1/5 fwd 6/39  flows: 465/504  [#---------------------------------------]   3% pass 1/5 fwd 7/39  flows: 502/504  [#---------------------------------------]   4% pass 1/5 fwd 8/39  flows: 503/749  [######################------------------]  56% flows: 504/896  time: 85.2 ms  events: 40M  [###############################---------]  79% flows: 712/896  time: 92.9 ms  events: 50M  

@@ -9,9 +9,17 @@ htsim_tcp_*
 
 # Run logs and outputs
 log/
+log_batch_tmp/
+predict-plan/
 SimAI_htsim.log
 fct_output*.txt
 ncclFlowModel_*.csv
+run_batch_tmp.sh
+
+# Root-level notes and generated docs
+/*.md
+!/README.md
+!/readme.md
 
 # macOS
 .DS_Store
